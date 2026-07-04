@@ -61,6 +61,8 @@ generate
     end
 endgenerate
 
+endmodule
+
 
 // mac_unit pe(.clk(clk), .rst_n(rst_n), .valid(valid), .clear(clear),
 //     .a_in(a_in[i]), .b_in(b_in[i]), )

@@ -1,8 +1,7 @@
-module
-    mac_unit #(
+module mac_unit #(
 parameter DATA_WIDTH = 8,   // int8 input width
 parameter ACCUM_WIDTH = 21
-)(
+) (
         input logic clk,
         input  logic rst_n,    // _n: negative logic
         input logic signed [(DATA_WIDTH-1):0] a_in,     // int8
@@ -17,19 +16,12 @@ parameter ACCUM_WIDTH = 21
     
   always_ff @(posedge clk or negedge rst_n)
   begin
-    if(!rst_n)
+    if(!rst_n || clear)
     begin
       a_out<= '0;
       b_out<= '0;
       accum_out<= '0;
     end
-    else
-    begin
-      
-      if(clear)
-      begin
-        accum_out<='0;
-      end
       else if (valid) 
       begin
         a_out<=a_in;
@@ -37,6 +29,5 @@ parameter ACCUM_WIDTH = 21
       accum_out<=accum_out +ACCUM_WIDTH'(a_in*b_in);    //removes ambiguity and extends result to 21 bit signed
       end
     end
-  end
 
 endmodule

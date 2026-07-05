@@ -7,3 +7,4 @@ final/
 img/
 *.lyrdb
 .ipynb_checkpoints/
+.DS_Store

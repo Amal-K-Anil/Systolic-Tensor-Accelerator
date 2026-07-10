@@ -270,6 +270,7 @@ Testbenches use **cocotb** (Python) with **NumPy** as the software golden model.
 - [Physical Implementation Analysis](docs/Physical_Implementation_Analysis_v1.0.pdf)
 - [Project Proposal](docs/Chipathon_Proposal_Slides_v1.0.pdf)
 - [Schematic Review Slides](docs/Schematic_Review_Slides_v1.0.pdf)
+- [Progress Tracker](https://docs.google.com/spreadsheets/d/1Rfl_xbEPnYtsQbiFe8S4vHPcbO-48h-Qb6fZFTNUoBU/edit?usp=sharing)
 - [Chipathon 2026 Issue #60](https://github.com/sscs-ose/sscs-chipathon-2026/issues/60)
 
 ---

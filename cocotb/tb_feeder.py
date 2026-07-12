@@ -86,8 +86,8 @@ class SramModel:
 async def reset(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_NS, units="ns").start())
     dut.rst_n.value      = 0
-    dut.swap_pulse.value = 0
-    dut.last_pass.value  = 0
+    dut.start.value = 0
+    dut.drain_en.value  = 0
     dut.clear.value      = 0
     dut.sram_data.value  = 0
     for _ in range(3):
@@ -95,7 +95,7 @@ async def reset(dut):
     dut.rst_n.value = 1
     await RisingEdge(dut.clk)
 
-async def tick(dut, sm, swap_pulse=0, last_pass=0, clear=0):
+async def tick(dut, sm, start=0, drain_en=0, clear=0):
     """
     One cycle:
       1. sm.pre_tick(): drive sram_data = mem[addr_{N-3}] before rising edge
@@ -106,8 +106,8 @@ async def tick(dut, sm, swap_pulse=0, last_pass=0, clear=0):
       6. sm.post_tick(): shift pipeline with addr_N
     """
     sm.pre_tick(dut)
-    dut.swap_pulse.value = swap_pulse
-    dut.last_pass.value  = last_pass
+    dut.start.value = start
+    dut.drain_en.value  = drain_en
     dut.clear.value      = clear
     await RisingEdge(dut.clk)
     await Timer(1, units="ns")
@@ -159,7 +159,7 @@ async def test_address_sequence(dut):
             expected.append(64 + k * ARRAY_SIZE + col)
     got = []
     for i in range(TILE_BYTES + 5):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0))
+        s = await tick(dut, sm, start=(1 if i == 0 else 0))
         if s["re"]:
             got.append(s["addr"])
     ok("test_address_sequence", got == expected)
@@ -169,7 +169,7 @@ async def test_read_en_self_stop(dut):
     """read_en HIGH for exactly 128 cycles then LOW forever."""
     await reset(dut)
     sm    = SramModel(make_sram())
-    snaps = [await tick(dut, sm, swap_pulse=(1 if i == 0 else 0))
+    snaps = [await tick(dut, sm, start=(1 if i == 0 else 0))
              for i in range(TILE_BYTES + 10)]
     hist  = [s["re"] for s in snaps]
     ones  = [i for i, v in enumerate(hist) if v]
@@ -185,7 +185,7 @@ async def test_valid_pulse_timing(dut):
     sm   = SramModel(make_sram())
     vcyc = []
     for i in range(TILE_BYTES + 30):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0), last_pass=0)
+        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
         if s["v"]:
             vcyc.append(i)
     ok("test_valid_pulse_timing",
@@ -200,7 +200,7 @@ async def test_wavefront_normal(dut):
     pidx   = 0
     passed = True
     for i in range(TILE_BYTES + 30):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0), last_pass=0)
+        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
         if s["v"] and pidx < ARRAY_SIZE:
             if s["a"] != EXP_A[pidx] or s["b"] != EXP_B[pidx]:
                 dut._log.error(
@@ -219,7 +219,7 @@ async def test_drain_phase(dut):
     normal = 0
     drain_snaps = []
     for i in range(TILE_BYTES + DRAIN_CYCLES + 15):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0), last_pass=1)
+        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=1)
         if s["v"]:
             if normal < ARRAY_SIZE:
                 normal += 1
@@ -247,38 +247,38 @@ async def test_drain_done_timing(dut):
     vcyc  = []
     ddcyc = []
     for i in range(TILE_BYTES + DRAIN_CYCLES + 15):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0), last_pass=1)
+        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=1)
         if s["v"]:  vcyc.append(i)
         if s["dd"]: ddcyc.append(i)
     ok("test_drain_done_timing",
        len(ddcyc) == 1 and bool(vcyc) and ddcyc[0] == vcyc[-1])
 
 @cocotb.test()
-async def test_swap_pulse_restart(dut):
-    """swap_pulse restarts read_en immediately; skew buffer NOT cleared."""
+async def test_start_restart(dut):
+    """start restarts read_en immediately; skew buffer NOT cleared."""
     await reset(dut)
     sm1 = SramModel(make_sram(0))
     for i in range(TILE_BYTES + 5):
-        await tick(dut, sm1, swap_pulse=(1 if i == 0 else 0), last_pass=0)
+        await tick(dut, sm1, start=(1 if i == 0 else 0), drain_en=0)
     await Timer(1, units="ns")
     skew_nonzero = (int(dut.a_in.value) != 0)
-    s = await tick(dut, sm1, swap_pulse=1)
+    s = await tick(dut, sm1, start=1)
     restarted = (s["re"] == 1)
     sm2  = SramModel(make_sram(50))
     vcnt = 0
     for _ in range(TILE_BYTES + 30):
-        s = await tick(dut, sm2, last_pass=0)
+        s = await tick(dut, sm2, drain_en=0)
         if s["v"]: vcnt += 1
-    ok("test_swap_pulse_restart",
+    ok("test_start_restart",
        skew_nonzero and restarted and vcnt == ARRAY_SIZE)
 
 @cocotb.test()
 async def test_clear_full_reset(dut):
-    """clear zeros all state; feeder stays idle until next swap_pulse."""
+    """clear zeros all state; feeder stays idle until next start."""
     await reset(dut)
     sm = SramModel(make_sram())
     for i in range(60):
-        await tick(dut, sm, swap_pulse=(1 if i == 0 else 0))
+        await tick(dut, sm, start=(1 if i == 0 else 0))
     await Timer(1, units="ns")
     was_nonzero = (int(dut.a_in.value) != 0)
     await tick(dut, sm, clear=1)
@@ -304,11 +304,11 @@ async def test_two_tile_continuous(dut):
     sm2 = SramModel(make_sram(7))
     v1  = 0
     for i in range(TILE_BYTES + 3):
-        s = await tick(dut, sm1, swap_pulse=(1 if i == 0 else 0), last_pass=0)
+        s = await tick(dut, sm1, start=(1 if i == 0 else 0), drain_en=0)
         if s["v"]: v1 += 1
     v2 = dd = drain = 0
     for i in range(TILE_BYTES + DRAIN_CYCLES + 10):
-        s = await tick(dut, sm2, swap_pulse=(1 if i == 0 else 0), last_pass=1)
+        s = await tick(dut, sm2, start=(1 if i == 0 else 0), drain_en=1)
         if s["v"]:
             if v2 < ARRAY_SIZE: v2 += 1
             else:               drain += 1
@@ -327,7 +327,7 @@ async def test_valid_no_glitch(dut):
     prev    = 0
     ok_flag = True
     for i in range(TILE_BYTES + 20):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0), last_pass=0)
+        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
         if s["v"] == 1 and prev == 1:
             dut._log.error(f"valid glitch at cycle {i}")
             ok_flag = False
@@ -366,8 +366,8 @@ async def test_staging_capture_timing(dut):
 
     for i in range(TILE_BYTES + 15):
         sm.pre_tick(dut)
-        dut.swap_pulse.value = (1 if i == 0 else 0)
-        dut.last_pass.value  = 0
+        dut.start.value = (1 if i == 0 else 0)
+        dut.drain_en.value  = 0
         dut.clear.value      = 0
         await RisingEdge(dut.clk)
         await Timer(1, units="ns")
@@ -435,8 +435,8 @@ async def test_staging_phase_separation(dut):
 
     for i in range(TILE_BYTES + 10):
         sm.pre_tick(dut)
-        dut.swap_pulse.value = (1 if i == 0 else 0)
-        dut.last_pass.value  = 0
+        dut.start.value = (1 if i == 0 else 0)
+        dut.drain_en.value  = 0
         dut.clear.value      = 0
         await RisingEdge(dut.clk)
         await Timer(1, units="ns")
@@ -482,10 +482,10 @@ async def test_back_to_back_tiles(dut):
     Verify back-to-back tile wavefront (2 tiles, same A/B = 1..64 row-major).
     Verified against feeder_8x8_150_cycle_trace_updated.xlsx.
 
-    Tile 1 (last_pass=0, 8 normal valids, no drain):
+    Tile 1 (drain_en=0, 8 normal valids, no drain):
       Standard diagonal wavefront — identical to EXP_A[0..7] / EXP_B[0..7].
 
-    Tile 2 (last_pass=1, 8 normal valids + drain):
+    Tile 2 (drain_en=1, 8 normal valids + drain):
       Skew carries tile 1 tail data into tile 2. Deep rows (large i) still
       drain tile 1's values while shallow rows start fresh with tile 2's data.
       Drain: 14 contiguous pulses, last 7 all zero.
@@ -536,10 +536,10 @@ async def test_back_to_back_tiles(dut):
     sm     = SramModel(make_sram())
     passed = True
 
-    # ── Tile 1: last_pass=0, 8 normal valids, no drain ───────────────────────
+    # ── Tile 1: drain_en=0, 8 normal valids, no drain ───────────────────────
     pidx = 0
     for i in range(TILE_BYTES + 5):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0), last_pass=0)
+        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
         if s["v"] and pidx < ARRAY_SIZE:
             if s["a"] != EXP_T1_A[pidx] or s["b"] != EXP_T1_B[pidx]:
                 dut._log.error(
@@ -553,11 +553,11 @@ async def test_back_to_back_tiles(dut):
         dut._log.error(f"Tile 1: {pidx} normal valids, expected {ARRAY_SIZE}")
         passed = False
 
-    # ── Tile 2: swap immediately, last_pass=1 ────────────────────────────────
+    # ── Tile 2: swap immediately, drain_en=1 ────────────────────────────────
     pidx = 0
     drain_snaps = []
     for i in range(TILE_BYTES + DRAIN_CYCLES + 15):
-        s = await tick(dut, sm, swap_pulse=(1 if i == 0 else 0), last_pass=1)
+        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=1)
         if s["v"]:
             if pidx < ARRAY_SIZE:
                 print(f"T2 pulse {pidx}: a={s[chr(97)]} b={s[chr(98)]}")

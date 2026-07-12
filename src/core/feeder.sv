@@ -38,8 +38,8 @@ module feeder #(
     output wire                        read_en,
 
     // Control from controller (spec Section 4.5 port names)
-    input  wire                        swap_pulse,
-    input  wire                        last_pass,
+    input  wire                        start,
+    input  wire                        drain_en,
     input  wire                        clear,
 
     // To systolic_array — packed: slice [i*8 +: 8] = row i
@@ -96,7 +96,7 @@ module feeder #(
         end else if (clear) begin
             read_counter <= {CNT_WIDTH{1'b0}};
             reading      <= 1'b0;
-        end else if (swap_pulse) begin
+        end else if (start) begin
             read_counter <= {CNT_WIDTH{1'b0}};
             reading      <= 1'b1;
         end else if (reading) begin
@@ -144,7 +144,7 @@ module feeder #(
     // drain_start:  fires on last normal valid of last tile.
     // -----------------------------------------------------------------------
     wire valid_normal = cap_en_d2 & phase_d2 & (pos_d2 == ARRAY_SIZE - 1);
-    wire drain_start  = valid_normal & ~reading & last_pass;
+    wire drain_start  = valid_normal & ~reading & drain_en;
     reg  drain_start_d1;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)     drain_start_d1 <= 1'b0;

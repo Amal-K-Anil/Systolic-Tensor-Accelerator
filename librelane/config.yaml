@@ -209,8 +209,8 @@ MACROS:
     lef:
       - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/lef/gf180mcu_fd_ip_sram__sram128x8m8wm1.lef
 
-    vh:
-      - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/verilog/gf180mcu_fd_ip_sram__sram128x8m8wm1.v
+   vh:
+      - dir::../ip/gf180mcu_fd_ip_sram__sram128x8m8wm1/vh/gf180mcu_fd_ip_sram__sram128x8m8wm1.vh
 
     spice:
       - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/spice/gf180mcu_fd_ip_sram__sram128x8m8wm1.spice

@@ -39,7 +39,7 @@ booth_multiplier #(
       begin
         a_out<=a_in;
         b_out<=b_in;
-      accum_out<=accum_out +ACCUM_WIDTH'(product);    //removes ambiguity and extends result to 21 bit signed
+      accum_out <= accum_out + {{(ACCUM_WIDTH - 2*DATA_WIDTH){product[(2*DATA_WIDTH)-1]}}, product};    //removes ambiguity and extends result to 21 bit signed
       end
     end
 

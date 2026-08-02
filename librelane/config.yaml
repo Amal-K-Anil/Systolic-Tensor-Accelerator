@@ -25,9 +25,35 @@ meta:
     #Checker.LVS: null
 
 DESIGN_NAME: chip_top
+
 VERILOG_FILES:
-- dir::../src/chip_top.sv
-- dir::../src/chip_core.sv
+  # Accelerator RTL
+  - dir::../src/core/booth_encoder.sv
+  - dir::../src/core/ppdt_booth.sv
+  - dir::../src/core/booth_multiplier.sv
+  - dir::../src/core/mac_unit.sv
+  - dir::../src/core/systolic_array.sv
+  - dir::../src/core/output_processor.sv
+  - dir::../src/core/memory.sv
+  - dir::../src/core/feeder.sv
+  - dir::../src/core/controller.sv
+  - dir::../src/core/accelerator_core.sv
+
+  # Chipathon host/padring wrapper
+  - dir::../src/chipathon_wrapper/chip_core.sv
+  - dir::../src/chipathon_wrapper/chip_top.sv
+
+# Allows chip_top.sv to find slot_defines.svh
+VERILOG_INCLUDE_DIRS:
+  - dir::../src/chipathon_wrapper
+  - dir::../src/core
+
+# Select the 1x1 slot
+VERILOG_DEFINES:
+  - SLOT_1X1
+
+# Enables VDD/VSS ports in chip_top and chip_core
+VERILOG_POWER_DEFINE: USE_POWER_PINS
 
 # Enable plugin for better SystemVerilog support
 # USE_SLANG: True
@@ -171,17 +197,46 @@ MACROS:
         - dir::../ip/gf180mcu_ws_ip__logo/lib/gf180mcu_ws_ip__logo.lib
     instances:
       wafer_space_logo:
-        location: ["expr::$DIE_AREA[2] + -169.25", "expr::$DIE_AREA[3] + -169.25"]
+        location:
+          - "expr::$DIE_AREA[2] + -169.25"
+          - "expr::$DIE_AREA[3] + -169.25"
         orientation: N
 
-# No user macros for the workshop slot -- the core is a trivial
-# counter.  chip_id + wafer.space logo (above) are the only placed
-# macros.
+  gf180mcu_fd_ip_sram__sram128x8m8wm1:
+    gds:
+      - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/gds/gf180mcu_fd_ip_sram__sram128x8m8wm1.gds
 
-# No macro PDN connections needed beyond what the PDN grid already
-# supplies through chip_id / logo.  Keep the key as an empty list so
-# the rest of the config still parses.
-PDN_MACRO_CONNECTIONS: []
+    lef:
+      - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/lef/gf180mcu_fd_ip_sram__sram128x8m8wm1.lef
+
+    vh:
+      - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/verilog/gf180mcu_fd_ip_sram__sram128x8m8wm1.v
+
+    spice:
+      - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/spice/gf180mcu_fd_ip_sram__sram128x8m8wm1.spice
+
+    lib:
+      "*_tt_025C_5v00":
+        - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/lib/gf180mcu_fd_ip_sram__sram128x8m8wm1__tt_025C_5v00.lib
+
+      "*_ss_125C_4v50":
+        - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/lib/gf180mcu_fd_ip_sram__sram128x8m8wm1__ss_125C_4v50.lib
+
+      "*_ff_n40C_5v50":
+        - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/lib/gf180mcu_fd_ip_sram__sram128x8m8wm1__ff_n40C_5v50.lib
+
+    instances:
+      i_chip_core.u_accelerator_core.u_memory.SRAM_0:
+        orientation: N
+
+      i_chip_core.u_accelerator_core.u_memory.SRAM_1:
+        orientation: N
+
+# The accelerator contains two GF180 128x8 SRAM hard macros.
+
+PDN_MACRO_CONNECTIONS:
+  - "i_chip_core.u_accelerator_core.u_memory.SRAM_0 VDD VSS VDD VSS"
+  - "i_chip_core.u_accelerator_core.u_memory.SRAM_1 VDD VSS VDD VSS"
 
 # Halo size around macros while cutting rows.
 # Workaround for: https://github.com/The-OpenROAD-Project/OpenROAD/issues/8868

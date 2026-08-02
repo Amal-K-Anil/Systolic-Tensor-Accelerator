@@ -16,14 +16,15 @@
 # ========================
 SIM          ?= icarus
 COMPILE_ARGS += -g2012
+COMPILE_ARGS += -DFUNCTIONAL
 
 # ========================
 # Shared Sources
 # ========================
-TIMESCALE     = $(abspath ../timescale.v)
-CORE_DIR      = $(abspath ../../src/core)
-WRAPPER_DIR   = $(abspath ../../src/chipathon_wrapper)
-AXI_DIR       = $(abspath ../../src/axi_wrapper)
+TIMESCALE     = $(abspath timescale.v)
+CORE_DIR      = $(abspath ../src/core)
+WRAPPER_DIR   = $(abspath ../src/chipathon_wrapper)
+AXI_DIR       = $(abspath ../src/axi_wrapper)
 
 VERILOG_SOURCES = $(TIMESCALE)
 
@@ -32,10 +33,16 @@ VERILOG_SOURCES = $(TIMESCALE)
 # ========================
 ifeq ($(TOPLEVEL), mac_unit)
     MODULE           = tb_mac_unit
+    VERILOG_SOURCES += $(CORE_DIR)/booth_encoder.sv
+    VERILOG_SOURCES += $(CORE_DIR)/ppdt_booth.sv
+    VERILOG_SOURCES += $(CORE_DIR)/booth_multiplier.sv
     VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
 
 else ifeq ($(TOPLEVEL), systolic_array)
     MODULE           = tb_systolic_array
+    VERILOG_SOURCES += $(CORE_DIR)/booth_encoder.sv
+    VERILOG_SOURCES += $(CORE_DIR)/ppdt_booth.sv
+    VERILOG_SOURCES += $(CORE_DIR)/booth_multiplier.sv
     VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
     VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
 
@@ -45,6 +52,7 @@ else ifeq ($(TOPLEVEL), feeder)
 
 else ifeq ($(TOPLEVEL), memory)
     MODULE           = tb_memory
+    VERILOG_SOURCES += /foss/pdks/ciel/gf180mcu/versions/7b70722e33c03fcb5dabcf4d479fb0822d9251c9/gf180mcuD/libs.ref/gf180mcu_fd_ip_sram/verilog/gf180mcu_fd_ip_sram__sram128x8m8wm1.v
     VERILOG_SOURCES += $(CORE_DIR)/memory.sv
 
 else ifeq ($(TOPLEVEL), controller)
@@ -59,13 +67,27 @@ else ifeq ($(TOPLEVEL), output_processor)
 
 else ifeq ($(TOPLEVEL), accelerator_core)
     MODULE           = tb_accelerator_core
+
+    # Feeder simulation-only debug ports.
+    COMPILE_ARGS    += -DFEEDER_DEBUG
+
+    # Excel and current architecture use the 8x8 configuration.
+    COMPILE_ARGS    += -Paccelerator_core.ARRAY_SIZE=8
+
+   # VERILOG_SOURCES += $(CURDIR)/models/gf180_sram128x8_functional.v
+    VERILOG_SOURCES += /foss/pdks/ciel/gf180mcu/versions/7b70722e33c03fcb5dabcf4d479fb0822d9251c9/gf180mcuD/libs.ref/gf180mcu_fd_ip_sram/verilog/gf180mcu_fd_ip_sram__sram128x8m8wm1.v
+
+    VERILOG_SOURCES += $(CORE_DIR)/booth_encoder.sv
+    VERILOG_SOURCES += $(CORE_DIR)/ppdt_booth.sv
+    VERILOG_SOURCES += $(CORE_DIR)/booth_multiplier.sv
     VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
     VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
-    VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/memory.sv
-    VERILOG_SOURCES += $(CORE_DIR)/controller.sv
     VERILOG_SOURCES += $(CORE_DIR)/output_processor.sv
+    VERILOG_SOURCES += $(CORE_DIR)/memory.sv
+    VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
+    VERILOG_SOURCES += $(CORE_DIR)/controller.sv
     VERILOG_SOURCES += $(CORE_DIR)/accelerator_core.sv
+
 
 else ifeq ($(TOPLEVEL), accelerator_top)
     MODULE           = tb_accelerator_top
@@ -143,7 +165,7 @@ all-integration: ## Run all integration testbenches
 		$(MAKE) TOPLEVEL=$$m || exit 1; \
 	done
 
-clean: ## Remove all simulation build artifacts
+clean:: ## Remove all simulation build artifacts
 	rm -rf sim_build __pycache__ results.xml *.vcd *.fst
 
 help: ## Show this help message

@@ -154,18 +154,6 @@ module chip_core #(
         .ready_out (ready_out)
     );
 
-    // Prevent an unused-input warning for the discrete input-pad bank.
-    logic unused_inputs;
-    assign unused_inputs = &{1'b0, input_in};
-
-    // Free-running counter, width equal to the number of bidir pads.
-    logic [NUM_BIDIR_PADS-1:0] count;
-    always_ff @(posedge clk) begin
-        if (!rst_n) count <= '0;
-        else        count <= count + 1;
-    end
-    assign bidir_out = count;
-
 endmodule
 
 `default_nettype wire

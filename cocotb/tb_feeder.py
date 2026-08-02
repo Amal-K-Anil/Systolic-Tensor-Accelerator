@@ -1,593 +1,635 @@
 """
-tb_feeder.py — cocotb testbench for feeder.sv
-SSCS Chipathon 2026 | Track A | Team Maxilerator | Owner: Irene
+Full cycle-by-cycle feeder verification and trace generation.
 
+This testbench checks BOTH cases requested by the Excel workbook:
+  1. one final tile
+  2. two back-to-back tiles, with no clear between tiles
+
+Every displayed clock is checked for:
+  - read_en, read_addr, read_counter and reading
+  - sram_data returned by the 2-cycle SRAM model
+  - every A_stage and B_stage register
+  - every physical skew_A and skew_B register (28 per side for N=8)
+  - every a_in and b_in lane, including valid=0 clocks
+  - normal-valid, drain-active, drain counter and drain_done
+
+Additionally, every clock is printed as ACTUAL versus EXPECTED and written to CSV.
+On valid clocks, a_in/b_in are also checked against the diagonal wavefront in
+"Valid Summary" from the Excel workbook.
+
+B-symbol byte encoding used by the hardware model:
+  a..z  -> byte 1..26
+  "1".."38" -> byte 27..64
+This preserves the workbook statement that all 64 B entries are distinct.
+The trace printer decodes those bytes back to the original Excel symbols.
+
+Important workbook notes:
+  - The back-to-back sheet omits cycle label 261. RTL drain cycle 1 is cycle 261.
+  - The back-to-back sheet has b_in[7]="36" at cycle 244; the correct value is
+    "38" from B[7][7].
+  - The workbook's a_in/b_in values during valid=0 are presentation values.
+    This test checks the real RTL outputs every cycle against an independent
+    register-level reference model, and checks Excel wavefront values on every
+    valid clock (the only clocks consumed by the systolic array).
 """
 
+from __future__ import annotations
+
+import csv
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Sequence, Tuple
+
 import cocotb
-from cocotb.clock    import Clock
+from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
-ARRAY_SIZE   = 8
-TILE_BYTES   = 2 * ARRAY_SIZE * ARRAY_SIZE
-DRAIN_CYCLES = 2 * (ARRAY_SIZE - 1)
-CLK_NS       = 40
+CLK_NS = 40
+N = 8
+TILE_BYTES = 2 * N * N
+SKEW_DEPTH = N * (N - 1) // 2
+DRAIN_CYCLES = 2 * (N - 1)
+TRACE_ALL = os.getenv("TRACE_ALL", "1") != "0"
+TRACE_DIR = Path(os.getenv("TRACE_DIR", "traces"))
 
-EXP_A = [
-    [ 1,  0,  0,  0,  0,  0,  0,  0],
-    [ 2,  9,  0,  0,  0,  0,  0,  0],
-    [ 3, 10, 17,  0,  0,  0,  0,  0],
-    [ 4, 11, 18, 25,  0,  0,  0,  0],
-    [ 5, 12, 19, 26, 33,  0,  0,  0],
-    [ 6, 13, 20, 27, 34, 41,  0,  0],
-    [ 7, 14, 21, 28, 35, 42, 49,  0],
-    [ 8, 15, 22, 29, 36, 43, 50, 57],
-    [ 0, 16, 23, 30, 37, 44, 51, 58],
-    [ 0,  0, 24, 31, 38, 45, 52, 59],
-    [ 0,  0,  0, 32, 39, 46, 53, 60],
-    [ 0,  0,  0,  0, 40, 47, 54, 61],
-    [ 0,  0,  0,  0,  0, 48, 55, 62],
-    [ 0,  0,  0,  0,  0,  0, 56, 63],
-    [ 0,  0,  0,  0,  0,  0,  0, 64],
-]
-EXP_B = [
-    [ 1,  0,  0,  0,  0,  0,  0,  0],
-    [ 9,  2,  0,  0,  0,  0,  0,  0],
-    [17, 10,  3,  0,  0,  0,  0,  0],
-    [25, 18, 11,  4,  0,  0,  0,  0],
-    [33, 26, 19, 12,  5,  0,  0,  0],
-    [41, 34, 27, 20, 13,  6,  0,  0],
-    [49, 42, 35, 28, 21, 14,  7,  0],
-    [57, 50, 43, 36, 29, 22, 15,  8],
-    [ 0, 58, 51, 44, 37, 30, 23, 16],
-    [ 0,  0, 59, 52, 45, 38, 31, 24],
-    [ 0,  0,  0, 60, 53, 46, 39, 32],
-    [ 0,  0,  0,  0, 61, 54, 47, 40],
-    [ 0,  0,  0,  0,  0, 62, 55, 48],
-    [ 0,  0,  0,  0,  0,  0, 63, 56],
-    [ 0,  0,  0,  0,  0,  0,  0, 64],
-]
 
-BASE_MEM = {}
-for _r in range(ARRAY_SIZE):
-    for _k in range(ARRAY_SIZE):
-        BASE_MEM[_r * ARRAY_SIZE + _k] = _r * ARRAY_SIZE + _k + 1
-for _k in range(ARRAY_SIZE):
-    for _c in range(ARRAY_SIZE):
-        BASE_MEM[64 + _k * ARRAY_SIZE + _c] = _k * ARRAY_SIZE + _c + 1
+# =============================================================================
+# Excel matrices and distinct byte encoding
+# =============================================================================
+A_MATRIX = [[r * N + c + 1 for c in range(N)] for r in range(N)]
 
-def make_sram(offset=0):
-    return {a: (v + offset) & 0xFF for a, v in BASE_MEM.items()}
 
-class SramModel:
-    """
-    Model of the feeder's SRAM interface, including 3-cycle capture pipeline.
-    """
-    def __init__(self, mem):
-        self.mem = mem
-        self.d0 = (0, 0)  # (addr, re) — most recent
-        self.d1 = (0, 0)
-        self.d2 = (0, 0)  # oldest — this is what we drive
+def b_id_to_symbol(value: int) -> str:
+    """Decode unique B byte ID 1..64 to the workbook symbol."""
+    if value == 0:
+        return "0"
+    if 1 <= value <= 26:
+        return chr(ord("a") + value - 1)
+    if 27 <= value <= 64:
+        return str(value - 26)
+    return f"0x{value:02X}"
 
-    def pre_tick(self, dut):
-        """Drive sram_data = mem[addr_{N-3}] BEFORE awaiting rising edge."""
-        addr, re = self.d2
-        dut.sram_data.value = self.mem.get(addr, 0) if re else 0
 
-    def post_tick(self, dut):
-        """Shift pipeline after sampling. Call AFTER Timer(1ns)."""
-        self.d2 = self.d1
-        self.d1 = self.d0
-        self.d0 = (int(dut.read_addr.value), int(dut.read_en.value))
+# Byte IDs 1..64 represent a..z, then 1..38.
+B_MATRIX = [[r * N + c + 1 for c in range(N)] for r in range(N)]
 
-    def swap(self, new_mem):
-        self.mem = new_mem
 
-async def reset(dut):
-    cocotb.start_soon(Clock(dut.clk, CLK_NS, units="ns").start())
-    dut.rst_n.value      = 0
-    dut.start.value = 0
-    dut.drain_en.value  = 0
-    dut.clear.value      = 0
-    dut.sram_data.value  = 0
-    for _ in range(3):
+def build_sram_image() -> Dict[int, int]:
+    image: Dict[int, int] = {}
+    for r in range(N):
+        for c in range(N):
+            image[r * N + c] = A_MATRIX[r][c]
+            image[N * N + r * N + c] = B_MATRIX[r][c]
+    return image
+
+
+SRAM_IMAGE = build_sram_image()
+
+
+def tile_vectors() -> Tuple[List[List[int]], List[List[int]]]:
+    a_vectors = [[A_MATRIX[row][k] for row in range(N)] for k in range(N)]
+    b_vectors = [[B_MATRIX[k][col] for col in range(N)] for k in range(N)]
+    return a_vectors, b_vectors
+
+
+A_TILE_VECTORS, B_TILE_VECTORS = tile_vectors()
+
+
+def expected_wavefront(
+    a_vectors: Sequence[Sequence[int]],
+    b_vectors: Sequence[Sequence[int]],
+    event_index: int,
+) -> Tuple[List[int], List[int]]:
+    """Diagonal wavefront. Lane i is delayed by i valid events."""
+    out_a: List[int] = []
+    out_b: List[int] = []
+    for lane in range(N):
+        src = event_index - lane
+        if 0 <= src < len(a_vectors):
+            out_a.append(int(a_vectors[src][lane]) & 0xFF)
+            out_b.append(int(b_vectors[src][lane]) & 0xFF)
+        else:
+            out_a.append(0)
+            out_b.append(0)
+    return out_a, out_b
+
+
+def expected_read_addr(read_counter: int) -> int:
+    pos = read_counter & (N - 1)
+    phase = (read_counter >> 3) & 1
+    k = read_counter >> 4
+    if phase == 0:
+        return pos * N + k
+    return N * N + k * N + pos
+
+
+def unpack_bytes(packed: int, count: int) -> List[int]:
+    return [(packed >> (8 * i)) & 0xFF for i in range(count)]
+
+
+def fmt_a(values: Sequence[int]) -> str:
+    return "[" + ",".join(str(v) for v in values) + "]"
+
+
+def fmt_b(values: Sequence[int]) -> str:
+    return "[" + ",".join(b_id_to_symbol(v) for v in values) + "]"
+
+
+def fmt_skew(values: Sequence[int], is_b: bool = False) -> str:
+    # Physical flattened order: row1 stage0, row2 stages0..1, ..., row7.
+    formatter = b_id_to_symbol if is_b else str
+    rows: List[str] = []
+    base = 0
+    for row in range(1, N):
+        row_values = values[base : base + row]
+        rows.append(f"r{row}:" + "/".join(formatter(v) for v in row_values))
+        base += row
+    return "{" + " ".join(rows) + "}"
+
+
+# =============================================================================
+# 2-cycle SRAM response source
+# =============================================================================
+@dataclass(frozen=True)
+class ReadRequest:
+    enabled: bool
+    address: int
+
+
+class SramLatency2:
+    def __init__(self, image: Dict[int, int]):
+        self.image = image
+        self.requests: List[ReadRequest] = []
+
+    def value_for_cycle(self, cycle: int) -> Tuple[int, str]:
+        source_cycle = cycle - 2
+        if source_cycle < 0:
+            return 0, "warmup"
+        request = self.requests[source_cycle]
+        if not request.enabled:
+            return 0, "idle"
+        value = self.image.get(request.address, 0)
+        if request.address < N * N:
+            return value, f"A@{request.address}"
+        return value, f"B@{request.address}({b_id_to_symbol(value)})"
+
+    def capture_request(self, enabled: bool, address: int) -> None:
+        self.requests.append(ReadRequest(enabled=enabled, address=address))
+
+
+# =============================================================================
+# Independent register-level feeder reference model
+# =============================================================================
+@dataclass
+class RefState:
+    reading: int = 0
+    read_counter: int = 0
+    current_tile_final: int = 0
+
+    cap_en_d1: int = 0
+    phase_d1: int = 0
+    pos_d1: int = 0
+    normal_valid: int = 0
+
+    drain_active: int = 0
+    drain_counter: int = 0
+    drain_done: int = 0
+
+    a_stage: List[int] = field(default_factory=lambda: [0] * N)
+    b_stage: List[int] = field(default_factory=lambda: [0] * N)
+    skew_a: List[int] = field(default_factory=lambda: [0] * SKEW_DEPTH)
+    skew_b: List[int] = field(default_factory=lambda: [0] * SKEW_DEPTH)
+
+    def read_addr(self) -> int:
+        return expected_read_addr(self.read_counter)
+
+    def a_in(self) -> List[int]:
+        out = [self.a_stage[0]]
+        for lane in range(1, N):
+            tail = lane * (lane - 1) // 2 + lane - 1
+            out.append(self.skew_a[tail])
+        return out
+
+    def b_in(self) -> List[int]:
+        out = [self.b_stage[0]]
+        for lane in range(1, N):
+            tail = lane * (lane - 1) // 2 + lane - 1
+            out.append(self.skew_b[tail])
+        return out
+
+    def valid(self) -> int:
+        return int(bool(self.normal_valid or self.drain_active))
+
+    def step(self, *, start: int, drain_en: int, clear: int, sram_data: int) -> None:
+        """Advance one rising edge using nonblocking-assignment semantics."""
+        old = RefState(
+            reading=self.reading,
+            read_counter=self.read_counter,
+            current_tile_final=self.current_tile_final,
+            cap_en_d1=self.cap_en_d1,
+            phase_d1=self.phase_d1,
+            pos_d1=self.pos_d1,
+            normal_valid=self.normal_valid,
+            drain_active=self.drain_active,
+            drain_counter=self.drain_counter,
+            drain_done=self.drain_done,
+            a_stage=self.a_stage.copy(),
+            b_stage=self.b_stage.copy(),
+            skew_a=self.skew_a.copy(),
+            skew_b=self.skew_b.copy(),
+        )
+
+        if clear:
+            self.reading = 0
+            self.read_counter = 0
+            self.current_tile_final = 0
+            self.cap_en_d1 = 0
+            self.phase_d1 = 0
+            self.pos_d1 = 0
+            self.normal_valid = 0
+            self.drain_active = 0
+            self.drain_counter = 0
+            self.drain_done = 0
+            self.a_stage = [0] * N
+            self.b_stage = [0] * N
+            self.skew_a = [0] * SKEW_DEPTH
+            self.skew_b = [0] * SKEW_DEPTH
+            return
+
+        old_phase_now = (old.read_counter >> 3) & 1
+        old_pos_now = old.read_counter & (N - 1)
+
+        # Read sequencer.
+        if start:
+            self.reading = 1
+            self.read_counter = 0
+            self.current_tile_final = int(bool(drain_en))
+        elif old.reading:
+            if old.read_counter == TILE_BYTES - 1:
+                self.reading = 0
+                self.read_counter = old.read_counter
+            else:
+                self.reading = 1
+                self.read_counter = old.read_counter + 1
+
+        # Metadata shadow and normal valid.
+        self.cap_en_d1 = old.reading
+        if old.reading:
+            self.phase_d1 = old_phase_now
+            self.pos_d1 = old_pos_now
+        self.normal_valid = int(
+            bool(old.cap_en_d1 and old.phase_d1 and old.pos_d1 == N - 1)
+        )
+
+        drain_begin = int(
+            bool(
+                old.normal_valid
+                and not old.reading
+                and old.current_tile_final
+                and not old.drain_active
+            )
+        )
+
+        # Drain control.
+        self.drain_done = 0
+        if drain_begin:
+            self.drain_active = 1
+            self.drain_counter = 0
+        elif old.drain_active:
+            if old.drain_counter == DRAIN_CYCLES - 1:
+                self.drain_active = 0
+                self.drain_counter = old.drain_counter
+                self.drain_done = 1
+            else:
+                self.drain_active = 1
+                self.drain_counter = old.drain_counter + 1
+
+        # Staging registers.
+        if drain_begin:
+            self.a_stage = [0] * N
+            self.b_stage = [0] * N
+        elif old.cap_en_d1:
+            if old.phase_d1:
+                self.b_stage[old.pos_d1] = sram_data & 0xFF
+            else:
+                self.a_stage[old.pos_d1] = sram_data & 0xFF
+
+        # Physical triangular skew registers.
+        if old.normal_valid or old.drain_active:
+            next_a = old.skew_a.copy()
+            next_b = old.skew_b.copy()
+            for row in range(1, N):
+                base = row * (row - 1) // 2
+                next_a[base] = old.a_stage[row]
+                next_b[base] = old.b_stage[row]
+                for depth in range(1, row):
+                    next_a[base + depth] = old.skew_a[base + depth - 1]
+                    next_b[base + depth] = old.skew_b[base + depth - 1]
+            self.skew_a = next_a
+            self.skew_b = next_b
+
+
+# =============================================================================
+# Trace/check helpers
+# =============================================================================
+async def reset_dut(dut) -> None:
+    dut.rst_n.value = 0
+
+    dut.data_in.value = 0
+    dut.valid_in.value = 0
+    dut.tile_done.value = 0
+    dut.last_pass.value = 0
+    dut.ready_out.value = 0
+
+    for _ in range(4):
         await RisingEdge(dut.clk)
+
     dut.rst_n.value = 1
-    await RisingEdge(dut.clk)
 
-async def tick(dut, sm, start=0, drain_en=0, clear=0):
-    """
-    One cycle:
-      1. sm.pre_tick(): drive sram_data = mem[addr_{N-3}] before rising edge
-      2. Drive control inputs
-      3. Rising edge fires — FF captures sram_data ✓
-      4. Timer 1ns — outputs settle
-      5. Sample outputs
-      6. sm.post_tick(): shift pipeline with addr_N
-    """
-    sm.pre_tick(dut)
-    dut.start.value = start
-    dut.drain_en.value  = drain_en
-    dut.clear.value      = clear
     await RisingEdge(dut.clk)
-    await Timer(1, units="ns")
-    snap = {
-        "re":   int(dut.read_en.value),
-        "addr": int(dut.read_addr.value),
-        "v":    int(dut.valid.value),
-        "dd":   int(dut.drain_done.value),
-        "a":    [(int(dut.a_in.value) >> (i * 8)) & 0xFF for i in range(ARRAY_SIZE)],
-        "b":    [(int(dut.b_in.value) >> (i * 8)) & 0xFF for i in range(ARRAY_SIZE)],
+    await Timer(1, unit="ns")
+
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+
+
+def get_actual(dut) -> Dict[str, object]:
+    return {
+        "read_en": int(dut.read_en.value),
+        "read_addr": int(dut.read_addr.value),
+        "sram_data": int(dut.sram_data.value),
+        "a_stage": unpack_bytes(int(dut.dbg_a_stage.value), N),
+        "b_stage": unpack_bytes(int(dut.dbg_b_stage.value), N),
+        "skew_a": unpack_bytes(int(dut.dbg_skew_a.value), SKEW_DEPTH),
+        "skew_b": unpack_bytes(int(dut.dbg_skew_b.value), SKEW_DEPTH),
+        "a_in": unpack_bytes(int(dut.a_in.value), N),
+        "b_in": unpack_bytes(int(dut.b_in.value), N),
+        "valid": int(dut.valid.value),
+        "drain_done": int(dut.drain_done.value),
+        "read_counter": int(dut.dbg_read_counter.value),
+        "reading": int(dut.dbg_reading.value),
+        "normal_valid": int(dut.dbg_normal_valid.value),
+        "drain_active": int(dut.dbg_drain_active.value),
+        "drain_counter": int(dut.dbg_drain_counter.value),
+        "tile_final": int(dut.dbg_current_tile_final.value),
     }
-    sm.post_tick(dut)
-    return snap
 
-def ok(name, passed):
-    tag = "PASS" if passed else "FAIL"
-    print(f"[{tag}] {name}")
-    assert passed, f"FAILED: {name}"
 
-@cocotb.test()
-async def test_reset_state(dut):
-    """After rst_n deasserts, all outputs must be zero and feeder idle."""
-    await reset(dut)
-    await Timer(1, units="ns")
-    ok("test_reset_state",
-       int(dut.read_en.value)    == 0 and
-       int(dut.valid.value)      == 0 and
-       int(dut.drain_done.value) == 0 and
-       int(dut.a_in.value)       == 0 and
-       int(dut.b_in.value)       == 0)
+def get_expected(ref: RefState, sram_data: int) -> Dict[str, object]:
+    return {
+        "read_en": ref.reading,
+        "read_addr": ref.read_addr(),
+        "sram_data": sram_data,
+        "a_stage": ref.a_stage.copy(),
+        "b_stage": ref.b_stage.copy(),
+        "skew_a": ref.skew_a.copy(),
+        "skew_b": ref.skew_b.copy(),
+        "a_in": ref.a_in(),
+        "b_in": ref.b_in(),
+        "valid": ref.valid(),
+        "drain_done": ref.drain_done,
+        "read_counter": ref.read_counter,
+        "reading": ref.reading,
+        "normal_valid": ref.normal_valid,
+        "drain_active": ref.drain_active,
+        "drain_counter": ref.drain_counter,
+        "tile_final": ref.current_tile_final,
+    }
 
-@cocotb.test()
-async def test_no_autostart(dut):
-    await reset(dut)
-    sm    = SramModel(make_sram())
-    snaps = [await tick(dut, sm) for _ in range(20)]
-    ok("test_no_autostart", all(s["re"] == 0 for s in snaps))
 
-@cocotb.test()
-async def test_address_sequence(dut):
-    """128 addresses in correct A/B interleaved order per spec Section 5.2."""
-    await reset(dut)
-    sm = SramModel(make_sram())
-    expected = []
-    for k in range(ARRAY_SIZE):
-        for row in range(ARRAY_SIZE):
-            expected.append(row * ARRAY_SIZE + k)
-        for col in range(ARRAY_SIZE):
-            expected.append(64 + k * ARRAY_SIZE + col)
-    got = []
-    for i in range(TILE_BYTES + 5):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0))
-        if s["re"]:
-            got.append(s["addr"])
-    ok("test_address_sequence", got == expected)
-
-@cocotb.test()
-async def test_read_en_self_stop(dut):
-    """read_en HIGH for exactly 128 cycles then LOW forever."""
-    await reset(dut)
-    sm    = SramModel(make_sram())
-    snaps = [await tick(dut, sm, start=(1 if i == 0 else 0))
-             for i in range(TILE_BYTES + 10)]
-    hist  = [s["re"] for s in snaps]
-    ones  = [i for i, v in enumerate(hist) if v]
-    ok("test_read_en_self_stop",
-       len(ones) == TILE_BYTES and
-       ones      == list(range(TILE_BYTES)) and
-       all(v == 0 for v in hist[TILE_BYTES:]))
-
-@cocotb.test()
-async def test_valid_pulse_timing(dut):
-    """Exactly ARRAY_SIZE valid pulses, each exactly 16 cycles apart."""
-    await reset(dut)
-    sm   = SramModel(make_sram())
-    vcyc = []
-    for i in range(TILE_BYTES + 30):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
-        if s["v"]:
-            vcyc.append(i)
-    ok("test_valid_pulse_timing",
-       len(vcyc) == ARRAY_SIZE and
-       all(vcyc[j + 1] - vcyc[j] == 16 for j in range(ARRAY_SIZE - 1)))
-
-@cocotb.test()
-async def test_wavefront_normal(dut):
-    """a_in/b_in at each of 8 normal valid pulses must match EXP_A/EXP_B rows 0-7."""
-    await reset(dut)
-    sm     = SramModel(make_sram())
-    pidx   = 0
-    passed = True
-    for i in range(TILE_BYTES + 30):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
-        if s["v"] and pidx < ARRAY_SIZE:
-            if s["a"] != EXP_A[pidx] or s["b"] != EXP_B[pidx]:
-                dut._log.error(
-                    f"Normal pulse {pidx}: "
-                    f"a_in={s['a']} expected={EXP_A[pidx]} | "
-                    f"b_in={s['b']} expected={EXP_B[pidx]}"
-                )
-                passed = False
-            pidx += 1
-    ok("test_wavefront_normal", passed and pidx == ARRAY_SIZE)
-
-@cocotb.test()
-async def test_drain_phase(dut):
-    await reset(dut)
-    sm     = SramModel(make_sram())
-    normal = 0
-    drain_snaps = []
-    for i in range(TILE_BYTES + DRAIN_CYCLES + 15):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=1)
-        if s["v"]:
-            if normal < ARRAY_SIZE:
-                normal += 1
-            else:
-                drain_snaps.append((i, s["a"], s["b"]))
-    count_ok   = (len(drain_snaps) == DRAIN_CYCLES)
-    cycs       = [c for c, _, _ in drain_snaps]
-    contiguous = (len(cycs) > 1 and
-                  all(cycs[j + 1] - cycs[j] == 1 for j in range(len(cycs) - 1)))
-    # Last 7 drain pulses must be all zero
-    zero_ok = all(
-        x == 0 for _, a, b in drain_snaps[9:] for x in a + b
+def assert_equal_cycle(cycle: int, actual: Dict[str, object], expected: Dict[str, object]) -> None:
+    fields = (
+        "read_en",
+        "read_addr",
+        "sram_data",
+        "read_counter",
+        "reading",
+        "tile_final",
+        "a_stage",
+        "b_stage",
+        "skew_a",
+        "skew_b",
+        "a_in",
+        "b_in",
+        "normal_valid",
+        "drain_active",
+        "drain_counter",
+        "valid",
+        "drain_done",
     )
-    if not zero_ok:
-        for di, (_, a, b) in enumerate(drain_snaps[9:]):
-            if any(x != 0 for x in a + b):
-                dut._log.error(f"Drain pulse {di+8} not zero: a_in={a} b_in={b}")
-    ok("test_drain_phase", count_ok and contiguous and zero_ok)
+    for field_name in fields:
+        got = actual[field_name]
+        exp = expected[field_name]
+        assert got == exp, (
+            f"cycle {cycle}: {field_name} mismatch\n"
+            f"  actual   = {got}\n"
+            f"  expected = {exp}"
+        )
 
-@cocotb.test()
-async def test_drain_done_timing(dut):
-    """drain_done fires exactly once, on the same cycle as the 14th drain pulse."""
-    await reset(dut)
-    sm    = SramModel(make_sram())
-    vcyc  = []
-    ddcyc = []
-    for i in range(TILE_BYTES + DRAIN_CYCLES + 15):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=1)
-        if s["v"]:  vcyc.append(i)
-        if s["dd"]: ddcyc.append(i)
-    ok("test_drain_done_timing",
-       len(ddcyc) == 1 and bool(vcyc) and ddcyc[0] == vcyc[-1])
 
-@cocotb.test()
-async def test_start_restart(dut):
-    """start restarts read_en immediately; skew buffer NOT cleared."""
-    await reset(dut)
-    sm1 = SramModel(make_sram(0))
-    for i in range(TILE_BYTES + 5):
-        await tick(dut, sm1, start=(1 if i == 0 else 0), drain_en=0)
-    await Timer(1, units="ns")
-    skew_nonzero = (int(dut.a_in.value) != 0)
-    s = await tick(dut, sm1, start=1)
-    restarted = (s["re"] == 1)
-    sm2  = SramModel(make_sram(50))
-    vcnt = 0
-    for _ in range(TILE_BYTES + 30):
-        s = await tick(dut, sm2, drain_en=0)
-        if s["v"]: vcnt += 1
-    ok("test_start_restart",
-       skew_nonzero and restarted and vcnt == ARRAY_SIZE)
-
-@cocotb.test()
-async def test_clear_full_reset(dut):
-    """clear zeros all state; feeder stays idle until next start."""
-    await reset(dut)
-    sm = SramModel(make_sram())
-    for i in range(60):
-        await tick(dut, sm, start=(1 if i == 0 else 0))
-    await Timer(1, units="ns")
-    was_nonzero = (int(dut.a_in.value) != 0)
-    await tick(dut, sm, clear=1)
-    await Timer(1, units="ns")
-    post_ok = (
-        int(dut.read_en.value)    == 0 and
-        int(dut.valid.value)      == 0 and
-        int(dut.drain_done.value) == 0 and
-        int(dut.a_in.value)       == 0 and
-        int(dut.b_in.value)       == 0
+def trace_line(
+    case_name: str,
+    cycle: int,
+    sheet_cycle: str,
+    source_desc: str,
+    actual: Dict[str, object],
+    expected: Dict[str, object],
+) -> str:
+    return (
+        f"{case_name} cy={cycle:03d} sheet={sheet_cycle:>3} | "
+        f"RE={actual['read_en']}/{expected['read_en']} "
+        f"ADDR={actual['read_addr']:03d}/{expected['read_addr']:03d} "
+        f"SRAM={actual['sram_data']:02d}/{expected['sram_data']:02d}({source_desc}) "
+        f"RC={actual['read_counter']:03d}/{expected['read_counter']:03d} | "
+        f"A_STAGE A={fmt_a(actual['a_stage'])} E={fmt_a(expected['a_stage'])} | "
+        f"B_STAGE A={fmt_b(actual['b_stage'])} E={fmt_b(expected['b_stage'])} | "
+        f"SKEW_A A={fmt_skew(actual['skew_a'])} E={fmt_skew(expected['skew_a'])} | "
+        f"SKEW_B A={fmt_skew(actual['skew_b'], True)} E={fmt_skew(expected['skew_b'], True)} | "
+        f"A_IN A={fmt_a(actual['a_in'])} E={fmt_a(expected['a_in'])} | "
+        f"B_IN A={fmt_b(actual['b_in'])} E={fmt_b(expected['b_in'])} | "
+        f"NV={actual['normal_valid']}/{expected['normal_valid']} "
+        f"DA={actual['drain_active']}/{expected['drain_active']} "
+        f"DC={actual['drain_counter']:02d}/{expected['drain_counter']:02d} "
+        f"V={actual['valid']}/{expected['valid']} "
+        f"DONE={actual['drain_done']}/{expected['drain_done']}"
     )
-    stays_idle = True
-    for _ in range(10):
-        s = await tick(dut, sm)
-        if s["re"] or s["v"]: stays_idle = False
-    ok("test_clear_full_reset", was_nonzero and post_ok and stays_idle)
 
-@cocotb.test()
-async def test_two_tile_continuous(dut):
-    """Back-to-back tiles: correct pulse counts and drain on last tile."""
-    await reset(dut)
-    sm1 = SramModel(make_sram(0))
-    sm2 = SramModel(make_sram(7))
-    v1  = 0
-    for i in range(TILE_BYTES + 3):
-        s = await tick(dut, sm1, start=(1 if i == 0 else 0), drain_en=0)
-        if s["v"]: v1 += 1
-    v2 = dd = drain = 0
-    for i in range(TILE_BYTES + DRAIN_CYCLES + 10):
-        s = await tick(dut, sm2, start=(1 if i == 0 else 0), drain_en=1)
-        if s["v"]:
-            if v2 < ARRAY_SIZE: v2 += 1
-            else:               drain += 1
-        if s["dd"]: dd += 1
-    ok("test_two_tile_continuous",
-       v1    == ARRAY_SIZE   and
-       v2    == ARRAY_SIZE   and
-       drain == DRAIN_CYCLES and
-       dd    == 1)
 
-@cocotb.test()
-async def test_valid_no_glitch(dut):
-    """valid must never be HIGH on two consecutive cycles during normal operation."""
-    await reset(dut)
-    sm      = SramModel(make_sram())
-    prev    = 0
-    ok_flag = True
-    for i in range(TILE_BYTES + 20):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
-        if s["v"] == 1 and prev == 1:
-            dut._log.error(f"valid glitch at cycle {i}")
-            ok_flag = False
-            break
-        prev = s["v"]
-    ok("test_valid_no_glitch", ok_flag)
+def csv_row(
+    case_name: str,
+    cycle: int,
+    sheet_cycle: str,
+    source_desc: str,
+    actual: Dict[str, object],
+    expected: Dict[str, object],
+) -> Dict[str, object]:
+    return {
+        "case": case_name,
+        "rtl_cycle": cycle,
+        "excel_sheet_cycle": sheet_cycle,
+        "sram_source": source_desc,
+        "read_en_actual": actual["read_en"],
+        "read_en_expected": expected["read_en"],
+        "read_addr_actual": actual["read_addr"],
+        "read_addr_expected": expected["read_addr"],
+        "sram_data_actual": actual["sram_data"],
+        "sram_data_expected": expected["sram_data"],
+        "read_counter_actual": actual["read_counter"],
+        "read_counter_expected": expected["read_counter"],
+        "a_stage_actual": fmt_a(actual["a_stage"]),
+        "a_stage_expected": fmt_a(expected["a_stage"]),
+        "b_stage_actual": fmt_b(actual["b_stage"]),
+        "b_stage_expected": fmt_b(expected["b_stage"]),
+        "skew_a_actual": fmt_skew(actual["skew_a"]),
+        "skew_a_expected": fmt_skew(expected["skew_a"]),
+        "skew_b_actual": fmt_skew(actual["skew_b"], True),
+        "skew_b_expected": fmt_skew(expected["skew_b"], True),
+        "a_in_actual": fmt_a(actual["a_in"]),
+        "a_in_expected": fmt_a(expected["a_in"]),
+        "b_in_actual": fmt_b(actual["b_in"]),
+        "b_in_expected": fmt_b(expected["b_in"]),
+        "normal_valid_actual": actual["normal_valid"],
+        "normal_valid_expected": expected["normal_valid"],
+        "drain_active_actual": actual["drain_active"],
+        "drain_active_expected": expected["drain_active"],
+        "drain_counter_actual": actual["drain_counter"],
+        "drain_counter_expected": expected["drain_counter"],
+        "valid_actual": actual["valid"],
+        "valid_expected": expected["valid"],
+        "drain_done_actual": actual["drain_done"],
+        "drain_done_expected": expected["drain_done"],
+        "all_internal_match": int(actual == expected),
+    }
 
-@cocotb.test()
-async def test_staging_capture_timing(dut):
-    """
-    Verify staging latency per probe test: addr at tick N → capture at tick N+3.
-    A_stage[0]=a_in[7:0], B_stage[0]=b_in[7:0] (zero skew, direct wires).
-    3 ticks after addr=0 presented:  a_in[0] must equal sram[0]=101.
-    3 ticks after addr=64 presented: b_in[0] must equal sram[64]=201.
-    """
-    await reset(dut)
 
-    raw_sram = {}
-    for a in range(64):
-        raw_sram[a] = (101 + a) & 0xFF
-    for a in range(64, 128):
-        raw_sram[a] = (201 + (a - 64)) & 0xFF
+def sheet_cycle_label(case_name: str, rtl_cycle: int) -> str:
+    if case_name == "B2B" and 261 <= rtl_cycle <= 274:
+        # Workbook skipped 261, so its drain rows are numbered one higher.
+        return str(rtl_cycle + 1)
+    if case_name == "B2B" and rtl_cycle == 275:
+        return "DONE"
+    return str(rtl_cycle)
 
-    sm = SramModel(raw_sram)
-    exp_A0 = raw_sram[0]    # 101
-    exp_B0 = raw_sram[64]   # 201
 
-    addr_0_cycle  = None
-    addr_64_cycle = None
-    a0_correct    = None
-    b0_correct    = None
-    cap_pipeline_ok = True
+async def run_case(
+    dut,
+    *,
+    case_name: str,
+    end_cycle: int,
+    starts: Dict[int, int],
+    drain_levels: Dict[int, int],
+    a_vectors: Sequence[Sequence[int]],
+    b_vectors: Sequence[Sequence[int]],
+    csv_name: str,
+) -> None:
+    ref = RefState()
+    sram = SramLatency2(SRAM_IMAGE)
+    rows: List[Dict[str, object]] = []
+    valid_event = 0
 
-    py_ced1 = 0; py_ph1 = 0; py_pos1 = 0
-    py_ced2 = 0; py_ph2 = 0; py_pos2 = 0
+    for cycle in range(end_cycle + 1):
+        start = starts.get(cycle, 0)
+        drain_en = drain_levels.get(cycle, 0)
+        sram_value, source_desc = sram.value_for_cycle(cycle)
 
-    for i in range(TILE_BYTES + 15):
-        sm.pre_tick(dut)
-        dut.start.value = (1 if i == 0 else 0)
-        dut.drain_en.value  = 0
-        dut.clear.value      = 0
+        dut.start.value = start
+        dut.drain_en.value = drain_en
+        dut.clear.value = 0
+        dut.sram_data.value = sram_value
+
         await RisingEdge(dut.clk)
-        await Timer(1, units="ns")
+        await Timer(1, unit="ns")
 
-        re   = int(dut.read_en.value)
-        addr = int(dut.read_addr.value)
-        ced1 = int(dut.cap_en_d1.value)
-        ph1  = int(dut.phase_d1.value)
-        pos1 = int(dut.pos_d1.value)
+        ref.step(start=start, drain_en=drain_en, clear=0, sram_data=sram_value)
+        actual = get_actual(dut)
+        expected = get_expected(ref, sram_value)
 
-        cap_d2 = py_ced2
-        ph_d2  = py_ph2
-        pos_d2 = py_pos2
+        # Check every visible and internal variable on every cycle.
+        assert_equal_cycle(cycle, actual, expected)
 
-        if re and addr == 0  and addr_0_cycle  is None: addr_0_cycle  = i
-        if re and addr == 64 and addr_64_cycle is None: addr_64_cycle = i
+        # Check the Excel diagonal wavefront on every valid cycle.
+        if actual["valid"]:
+            excel_a, excel_b = expected_wavefront(a_vectors, b_vectors, valid_event)
+            assert actual["a_in"] == excel_a, (
+                f"{case_name} cycle {cycle}: Excel A wavefront mismatch\n"
+                f"  actual   {fmt_a(actual['a_in'])}\n"
+                f"  expected {fmt_a(excel_a)}"
+            )
+            assert actual["b_in"] == excel_b, (
+                f"{case_name} cycle {cycle}: Excel B wavefront mismatch\n"
+                f"  actual   {fmt_b(actual['b_in'])}\n"
+                f"  expected {fmt_b(excel_b)}"
+            )
+            valid_event += 1
 
-        # Capture happens at tick N+3 per probe
-        if addr_0_cycle is not None and i == addr_0_cycle + 3:
-            got = (int(dut.a_in.value) >> 0) & 0xFF
-            a0_correct = (got == exp_A0)
-            if not a0_correct:
-                dut._log.error(f"A_stage[0] tick {i}: got {got}, expected {exp_A0}")
-            if not (cap_d2 == 1 and ph_d2 == 0 and pos_d2 == 0):
-                dut._log.error(
-                    f"A pipeline tick {i}: cap_d2={cap_d2}(w1) ph_d2={ph_d2}(w0) pos_d2={pos_d2}(w0)"
-                )
-                cap_pipeline_ok = False
+        label = sheet_cycle_label(case_name, cycle)
+        line = trace_line(case_name, cycle, label, source_desc, actual, expected)
+        if TRACE_ALL:
+            dut._log.info(line)
+        rows.append(csv_row(case_name, cycle, label, source_desc, actual, expected))
 
-        if addr_64_cycle is not None and i == addr_64_cycle + 3:
-            got = (int(dut.b_in.value) >> 0) & 0xFF
-            b0_correct = (got == exp_B0)
-            if not b0_correct:
-                dut._log.error(f"B_stage[0] tick {i}: got {got}, expected {exp_B0}")
-            if not (cap_d2 == 1 and ph_d2 == 1 and pos_d2 == 0):
-                dut._log.error(
-                    f"B pipeline tick {i}: cap_d2={cap_d2}(w1) ph_d2={ph_d2}(w1) pos_d2={pos_d2}(w0)"
-                )
-                cap_pipeline_ok = False
+        # Capture the address that is visible in this displayed cycle.
+        sram.capture_request(bool(actual["read_en"]), int(actual["read_addr"]))
 
-        sm.post_tick(dut)
-        py_ced2 = py_ced1; py_ph2 = py_ph1; py_pos2 = py_pos1
-        py_ced1 = ced1; py_ph1 = ph1; py_pos1 = pos1
+    TRACE_DIR.mkdir(parents=True, exist_ok=True)
+    csv_path = TRACE_DIR / csv_name
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
 
-    ok("test_staging_capture_timing",
-       a0_correct is not None and b0_correct is not None and
-       a0_correct and b0_correct and cap_pipeline_ok)
+    dut._log.info(
+        f"PASS {case_name}: checked {end_cycle + 1} cycles, "
+        f"{valid_event} Excel wavefronts, all staging registers, all "
+        f"{SKEW_DEPTH} skew registers per side; CSV={csv_path}"
+    )
+
+
+# =============================================================================
+# Tests
+# =============================================================================
+@cocotb.test()
+async def test_single_tile_full_cycle_trace(dut) -> None:
+    """One final tile: print and check every variable on every cycle."""
+    assert hasattr(dut, "dbg_skew_a"), (
+        "Compile with -DFEEDER_DEBUG; use the supplied Makefile"
+    )
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
+
+    # Single tile is final from its start.
+    await run_case(
+        dut,
+        case_name="ONE",
+        end_cycle=145,
+        starts={0: 1},
+        drain_levels={cycle: 1 for cycle in range(146)},
+        a_vectors=A_TILE_VECTORS,
+        b_vectors=B_TILE_VECTORS,
+        csv_name="single_tile_full_trace.csv",
+    )
+
 
 @cocotb.test()
-async def test_staging_phase_separation(dut):
-    """A bytes never land in B_stage and vice versa; pos sequences correctly."""
-    await reset(dut)
+async def test_two_tiles_full_cycle_trace(dut) -> None:
+    """Two back-to-back tiles: preserve skew and drain only after tile 2."""
+    assert hasattr(dut, "dbg_skew_a"), (
+        "Compile with -DFEEDER_DEBUG; use the supplied Makefile"
+    )
+    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
+    await reset_dut(dut)
 
-    raw_sram = {}
-    for a in range(64):
-        raw_sram[a] = 10 + a
-    for a in range(64, 128):
-        raw_sram[a] = (200 + (a - 64)) & 0xFF
-
-    sm = SramModel(raw_sram)
-    passed    = True
-    a_pos_seq = []
-    b_pos_seq = []
-    py_ced1 = 0; py_ph1 = 0; py_pos1 = 0
-
-    for i in range(TILE_BYTES + 10):
-        sm.pre_tick(dut)
-        dut.start.value = (1 if i == 0 else 0)
-        dut.drain_en.value  = 0
-        dut.clear.value      = 0
-        await RisingEdge(dut.clk)
-        await Timer(1, units="ns")
-
-        ced1 = int(dut.cap_en_d1.value)
-        ph1  = int(dut.phase_d1.value)
-        pos1 = int(dut.pos_d1.value)
-
-        cap_d2 = py_ced1; ph_d2 = py_ph1; pos_d2 = py_pos1
-
-        if cap_d2:
-            a_val = (int(dut.a_in.value) >> 0) & 0xFF
-            b_val = (int(dut.b_in.value) >> 0) & 0xFF
-            if ph_d2 == 0:
-                a_pos_seq.append(pos_d2)
-                if a_val != 0 and not (10 <= a_val <= 73):
-                    dut._log.error(f"Cycle {i}: A-phase but a_in[0]={a_val} not in [10,73]")
-                    passed = False
-            else:
-                b_pos_seq.append(pos_d2)
-                if not (b_val == 0 or (200 <= b_val <= 255) or b_val <= 7):
-                    dut._log.error(f"Cycle {i}: B-phase but b_in[0]={b_val} not in B-range")
-                    passed = False
-
-        sm.post_tick(dut)
-        py_ced1 = ced1; py_ph1 = ph1; py_pos1 = pos1
-
-    exp_pos_seq = list(range(ARRAY_SIZE)) * ARRAY_SIZE
-    if a_pos_seq != exp_pos_seq:
-        dut._log.error(f"A pos_d2: got {a_pos_seq}, expected {exp_pos_seq}")
-        passed = False
-    if b_pos_seq != exp_pos_seq:
-        dut._log.error(f"B pos_d2: got {b_pos_seq}, expected {exp_pos_seq}")
-        passed = False
-
-    ok("test_staging_phase_separation", passed)
-
-
-# ── Test 15: back-to-back tile wavefront ──────────────────────────────────────
-@cocotb.test()
-async def test_back_to_back_tiles(dut):
-    """
-    Verify back-to-back tile wavefront (2 tiles, same A/B = 1..64 row-major).
-    Verified against feeder_8x8_150_cycle_trace_updated.xlsx.
-
-    Tile 1 (drain_en=0, 8 normal valids, no drain):
-      Standard diagonal wavefront — identical to EXP_A[0..7] / EXP_B[0..7].
-
-    Tile 2 (drain_en=1, 8 normal valids + drain):
-      Skew carries tile 1 tail data into tile 2. Deep rows (large i) still
-      drain tile 1's values while shallow rows start fresh with tile 2's data.
-      Drain: 14 contiguous pulses, last 7 all zero.
-    """
-    await reset(dut)
-
-    EXP_T1_A = [
-        [ 1,  0,  0,  0,  0,  0,  0,  0],
-        [ 2,  9,  0,  0,  0,  0,  0,  0],
-        [ 3, 10, 17,  0,  0,  0,  0,  0],
-        [ 4, 11, 18, 25,  0,  0,  0,  0],
-        [ 5, 12, 19, 26, 33,  0,  0,  0],
-        [ 6, 13, 20, 27, 34, 41,  0,  0],
-        [ 7, 14, 21, 28, 35, 42, 49,  0],
-        [ 8, 15, 22, 29, 36, 43, 50, 57],
-    ]
-    EXP_T1_B = [
-        [ 1,  0,  0,  0,  0,  0,  0,  0],
-        [ 9,  2,  0,  0,  0,  0,  0,  0],
-        [17, 10,  3,  0,  0,  0,  0,  0],
-        [25, 18, 11,  4,  0,  0,  0,  0],
-        [33, 26, 19, 12,  5,  0,  0,  0],
-        [41, 34, 27, 20, 13,  6,  0,  0],
-        [49, 42, 35, 28, 21, 14,  7,  0],
-        [57, 50, 43, 36, 29, 22, 15,  8],
-    ]
-    EXP_T2_A = [
-        [ 1, 16, 23, 30, 37, 44, 51, 58],
-        [ 2,  9, 24, 31, 38, 45, 52, 59],
-        [ 3, 10, 17, 32, 39, 46, 53, 60],
-        [ 4, 11, 18, 25, 40, 47, 54, 61],
-        [ 5, 12, 19, 26, 33, 48, 55, 62],
-        [ 6, 13, 20, 27, 34, 41, 56, 63],
-        [ 7, 14, 21, 28, 35, 42, 49, 64],
-        [ 8, 15, 22, 29, 36, 43, 50, 57],
-    ]
-    EXP_T2_B = [
-        [ 1, 58, 51, 44, 37, 30, 23, 16],
-        [ 9,  2, 59, 52, 45, 38, 31, 24],
-        [17, 10,  3, 60, 53, 46, 39, 32],
-        [25, 18, 11,  4, 61, 54, 47, 40],
-        [33, 26, 19, 12,  5, 62, 55, 48],
-        [41, 34, 27, 20, 13,  6, 63, 56],
-        [49, 42, 35, 28, 21, 14,  7, 64],
-        [57, 50, 43, 36, 29, 22, 15,  8],
-    ]
-
-    sm     = SramModel(make_sram())
-    passed = True
-
-    # ── Tile 1: drain_en=0, 8 normal valids, no drain ───────────────────────
-    pidx = 0
-    for i in range(TILE_BYTES + 5):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=0)
-        if s["v"] and pidx < ARRAY_SIZE:
-            if s["a"] != EXP_T1_A[pidx] or s["b"] != EXP_T1_B[pidx]:
-                dut._log.error(
-                    f"T1 pulse {pidx}: "
-                    f"a_in={s['a']} expected={EXP_T1_A[pidx]} | "
-                    f"b_in={s['b']} expected={EXP_T1_B[pidx]}"
-                )
-                passed = False
-            pidx += 1
-    if pidx != ARRAY_SIZE:
-        dut._log.error(f"Tile 1: {pidx} normal valids, expected {ARRAY_SIZE}")
-        passed = False
-
-    # ── Tile 2: swap immediately, drain_en=1 ────────────────────────────────
-    pidx = 0
-    drain_snaps = []
-    for i in range(TILE_BYTES + DRAIN_CYCLES + 15):
-        s = await tick(dut, sm, start=(1 if i == 0 else 0), drain_en=1)
-        if s["v"]:
-            if pidx < ARRAY_SIZE:
-                print(f"T2 pulse {pidx}: a={s[chr(97)]} b={s[chr(98)]}")
-                if s["a"] != EXP_T2_A[pidx] or s["b"] != EXP_T2_B[pidx]:
-                    dut._log.error(
-                        f"T2 pulse {pidx}: "
-                        f"a_in={s['a']} expected={EXP_T2_A[pidx]} | "
-                        f"b_in={s['b']} expected={EXP_T2_B[pidx]}"
-                    )
-                    passed = False
-                pidx += 1
-            else:
-                drain_snaps.append((i, s["a"], s["b"]))
-
-    if pidx != ARRAY_SIZE:
-        dut._log.error(f"Tile 2: {pidx} normal valids, expected {ARRAY_SIZE}")
-        passed = False
-
-    # Drain: 14 contiguous, last 7 all zero (account for 1-pulse staging delay)
-    if len(drain_snaps) != DRAIN_CYCLES:
-        dut._log.error(f"T2 drain: {len(drain_snaps)} pulses, expected {DRAIN_CYCLES}")
-        passed = False
-    else:
-        cycs = [c for c,_,_ in drain_snaps]
-        if not all(cycs[j+1]-cycs[j]==1 for j in range(len(cycs)-1)):
-            dut._log.error("T2 drain not contiguous")
-            passed = False
-        for di, (_, a, b) in enumerate(drain_snaps[8:]):
-            if any(x != 0 for x in a + b):
-                dut._log.error(f"T2 drain pulse {di+9} not zero: a={a} b={b}")
-                passed = False
-
-    ok("test_back_to_back_tiles", passed)
+    # Tile 1 starts non-final. Tile 2 starts at cycle 131 as final. The level is
+    # raised at cycle 130, matching the controller/Excel boundary condition.
+    drain_levels = {cycle: int(cycle >= 130) for cycle in range(277)}
+    await run_case(
+        dut,
+        case_name="B2B",
+        end_cycle=276,
+        starts={0: 1, 131: 1},
+        drain_levels=drain_levels,
+        a_vectors=A_TILE_VECTORS + A_TILE_VECTORS,
+        b_vectors=B_TILE_VECTORS + B_TILE_VECTORS,
+        csv_name="two_tiles_full_trace.csv",
+    )

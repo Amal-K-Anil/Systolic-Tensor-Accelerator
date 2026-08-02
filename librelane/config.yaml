@@ -209,7 +209,7 @@ MACROS:
     lef:
       - pdk_dir::libs.ref/gf180mcu_fd_ip_sram/lef/gf180mcu_fd_ip_sram__sram128x8m8wm1.lef
 
-   vh:
+    vh:
       - dir::../ip/gf180mcu_fd_ip_sram__sram128x8m8wm1/vh/gf180mcu_fd_ip_sram__sram128x8m8wm1.vh
 
     spice:

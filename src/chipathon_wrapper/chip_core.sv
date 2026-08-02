@@ -64,6 +64,7 @@ module chip_core #(
 
     logic ready_in;
     logic valid_out;
+    logic output_done;
 
     logic [NUM_BIDIR_PADS-1:0] bidir_out_int;
     logic [NUM_BIDIR_PADS-1:0] bidir_oe_int;
@@ -128,7 +129,6 @@ module chip_core #(
     // CMOS input mode, fast slew, no pulls.
     assign bidir_cs = '0;
     assign bidir_sl = '0;
-    assign bidir_ie = ~bidir_oe;
     assign bidir_pu = '0;
     assign bidir_pd = '0;
 
@@ -149,10 +149,20 @@ module chip_core #(
         .tile_done (tile_done),
         .last_pass (last_pass),
 
-        .data_out  (accelerator_data_out),
-        .valid_out (valid_out),
-        .ready_out (ready_out)
+        .data_out    (accelerator_data_out),
+        .valid_out   (valid_out),
+        .ready_out   (ready_out),
+        .output_done (output_done)
     );
+
+        // Intentionally unused digital inputs/status.
+    wire _unused;
+
+    assign _unused = &{
+        1'b0,
+        input_in,
+        output_done
+    };
 
 endmodule
 

@@ -1,13 +1,22 @@
-// SPDX-FileCopyrightText: 2026 Chipathon 2026 workshop
-// SPDX-License-Identifier: Apache-2.0
+// =======================================================================================
+// chip_core.sv
 //
-// Minimal chip_core for the Chipathon 2026 workshop padring slot.
-// The emphasis of this slot is the padring itself (60 analog + 20
-// bidir + 4/4 power + clk/rst_n); the core is intentionally trivial:
-// a free-running counter whose state drives the 20 bidir pads. The
-// 60 analog pads are routed straight through to analog[] and stay
-// unconnected at the core level (the intent is that a downstream
-// design wires them to custom analog IP later).
+// chip_core is the Slot A padring pin-mapping layer. It knows only about raw,
+// index-based pad arrays (bidir_in/out/oe/..., input_in/pu/pd) as exposed by
+// chip_top -- no protocol logic lives here, only wire connections from specific
+// array indices to host_interface's named ports, plus per-pin electrical
+// configuration (input threshold, slew rate, pull resistors).
+//
+// Pin map (17 of 22 available signal pins used; the remaining 5 are simply not
+// instantiated in the SLOT_A definition, rather than left as unused pad indices):
+//   input_PAD[0]  a_valid_i        input_PAD[3]  b_last_i
+//   input_PAD[1]  a_last_i         input_PAD[4]  out_ready_i
+//   input_PAD[2]  b_valid_i
+//
+//   bidir_PAD[0:7]  data[7:0]      bidir_PAD[10] out_valid_o
+//   bidir_PAD[8]    a_ready_o      bidir_PAD[11] out_last_o
+//   bidir_PAD[9]    b_ready_o
+// =======================================================================================
 
 `default_nettype none
 
@@ -15,154 +24,96 @@ module chip_core #(
     parameter NUM_INPUT_PADS,
     parameter NUM_BIDIR_PADS,
     parameter NUM_ANALOG_PADS
-)(
+    )(
     `ifdef USE_POWER_PINS
     inout  wire VDD,
     inout  wire VSS,
     `endif
 
-    input  wire clk,       // clock
-    input  wire rst_n,     // reset (active low)
+    input  wire clk,
+    input  wire rst_n,
 
-    input  wire [NUM_INPUT_PADS-1:0] input_in,   // Input value
-    output wire [NUM_INPUT_PADS-1:0] input_pu,   // Pull-up
-    output wire [NUM_INPUT_PADS-1:0] input_pd,   // Pull-down
+    input  wire [NUM_INPUT_PADS-1:0] input_in,
+    output wire [NUM_INPUT_PADS-1:0] input_pu,
+    output wire [NUM_INPUT_PADS-1:0] input_pd,
 
-    input  wire [NUM_BIDIR_PADS-1:0] bidir_in,   // Input value
-    output wire [NUM_BIDIR_PADS-1:0] bidir_out,  // Output value
-    output wire [NUM_BIDIR_PADS-1:0] bidir_oe,   // Output enable
-    output wire [NUM_BIDIR_PADS-1:0] bidir_cs,   // Input type (0=CMOS, 1=Schmitt)
-    output wire [NUM_BIDIR_PADS-1:0] bidir_sl,   // Slew rate (0=fast, 1=slow)
-    output wire [NUM_BIDIR_PADS-1:0] bidir_ie,   // Input enable
-    output wire [NUM_BIDIR_PADS-1:0] bidir_pu,   // Pull-up
-    output wire [NUM_BIDIR_PADS-1:0] bidir_pd,   // Pull-down
+    input  wire [NUM_BIDIR_PADS-1:0] bidir_in,
+    output wire [NUM_BIDIR_PADS-1:0] bidir_out,
+    output wire [NUM_BIDIR_PADS-1:0] bidir_oe,
+    output wire [NUM_BIDIR_PADS-1:0] bidir_cs,
+    output wire [NUM_BIDIR_PADS-1:0] bidir_sl,
+    output wire [NUM_BIDIR_PADS-1:0] bidir_ie,
+    output wire [NUM_BIDIR_PADS-1:0] bidir_pu,
+    output wire [NUM_BIDIR_PADS-1:0] bidir_pd,
 
-    inout  wire [NUM_ANALOG_PADS-1:0] analog    // Analog
+    inout  wire [NUM_ANALOG_PADS-1:0] analog    // unused, purely digital design
 );
 
-    // =========================================================================
-    // Pad mapping
-    // =========================================================================
-    //
-    // bidir[7:0]  : shared input/output data bus
-    // bidir[8]    : valid_in
-    // bidir[9]    : tile_done
-    // bidir[10]   : last_pass
-    // bidir[11]   : ready_out
-    // bidir[12]   : ready_in
-    // bidir[13]   : valid_out
-    //
-    // All supported slots contain at least 20 bidirectional pads.
-
-    logic [7:0] accelerator_data_in;
-    logic [7:0] accelerator_data_out;
-
-    logic valid_in;
-    logic tile_done;
-    logic last_pass;
-    logic ready_out;
-
-    logic ready_in;
-    logic valid_out;
-    logic output_done;
-
-    logic [NUM_BIDIR_PADS-1:0] bidir_out_int;
-    logic [NUM_BIDIR_PADS-1:0] bidir_oe_int;
-    logic [NUM_BIDIR_PADS-1:0] bidir_ie_int;
-
-    // -------------------------------------------------------------------------
-    // Discrete input-pad configuration
-    // -------------------------------------------------------------------------
-    // The accelerator interface uses bidirectional pads, so the discrete input
-    // pads remain unused with pull-up and pull-down disabled.
+    // ===================================================================================
+    //  Input-Only Pads -> host_interface (host -> chip signals)
+    // ===================================================================================
+    wire a_valid_i   = input_in[0];
+    wire a_last_i    = input_in[1];
+    wire b_valid_i   = input_in[2];
+    wire b_last_i    = input_in[3];
+    wire out_ready_i = input_in[4];
 
     assign input_pu = '0;
     assign input_pd = '0;
 
-    // -------------------------------------------------------------------------
-    // Accelerator inputs
-    // -------------------------------------------------------------------------
 
-    assign accelerator_data_in = bidir_in[7:0];
+    // ===================================================================================
+    //  Bidir Pads -> host_interface (shared data bus + chip -> host signals)
+    // ===================================================================================
+    wire [7:0] data_i = bidir_in[7:0];
+    wire [7:0] data_o;
+    wire       data_oe;
 
-    assign valid_in  = bidir_in[8];
-    assign tile_done = bidir_in[9];
-    assign last_pass = bidir_in[10];
-    assign ready_out = bidir_in[11];
+    wire a_ready_o, b_ready_o, out_valid_o, out_last_o;
 
-    // -------------------------------------------------------------------------
-    // Bidirectional-pad configuration
-    // -------------------------------------------------------------------------
+    assign bidir_out[7:0]  = data_o;
+    assign bidir_out[8]    = a_ready_o;
+    assign bidir_out[9]    = b_ready_o;
+    assign bidir_out[10]   = out_valid_o;
+    assign bidir_out[11]   = out_last_o;
 
-    always_comb begin
-        // Safe defaults: all pads disabled and driving zero internally.
-        bidir_out_int = '0;
-        bidir_oe_int  = '0;
-        bidir_ie_int  = '0;
+    assign bidir_oe[7:0]   = {8{data_oe}};                    // data bus: direction-switched
+    assign bidir_oe[11:8]  = 4'b1111;                         // ready/valid/last outs: fixed
 
-        // Shared 8-bit data bus.
-        bidir_out_int[7:0] = accelerator_data_out;
-
-        // Host drives the data bus while the accelerator is not producing
-        // output. The accelerator drives it only while valid_out is asserted.
-        bidir_oe_int[7:0] = {8{valid_out}};
-        bidir_ie_int[7:0] = {8{~valid_out}};
-
-        // Input-only control pads.
-        bidir_ie_int[8]  = 1'b1; // valid_in
-        bidir_ie_int[9]  = 1'b1; // tile_done
-        bidir_ie_int[10] = 1'b1; // last_pass
-        bidir_ie_int[11] = 1'b1; // ready_out
-
-        // Output-only status pads.
-        bidir_out_int[12] = ready_in;
-        bidir_out_int[13] = valid_out;
-
-        bidir_oe_int[12] = 1'b1;
-        bidir_oe_int[13] = 1'b1;
-    end
-
-    assign bidir_out = bidir_out_int;
-    assign bidir_oe  = bidir_oe_int;
-    assign bidir_ie  = bidir_ie_int;
-
-    // CMOS input mode, fast slew, no pulls.
-    assign bidir_cs = '0;
-    assign bidir_sl = '0;
+    assign bidir_cs = '0;                                     // CMOS input threshold
+    assign bidir_sl = '0;                                     // fast slew
+    assign bidir_ie = ~bidir_oe;                              // listen only while not driving
     assign bidir_pu = '0;
     assign bidir_pd = '0;
 
-    // -------------------------------------------------------------------------
-    // Accelerator core
-    // -------------------------------------------------------------------------
+    // Keep synthesis from optimising away the unused analog pad.
+    logic _unused;
+    assign _unused = &{1'b0, analog};
 
-    accelerator_core #(
-        .ARRAY_SIZE(8)
-    ) u_accelerator_core (
-        .clk       (clk),
-        .rst_n     (rst_n),
 
-        .data_in   (accelerator_data_in),
-        .valid_in  (valid_in),
-        .ready_in  (ready_in),
+    // ===================================================================================
+    //  Host Interface
+    // ===================================================================================
+    host_interface u_host_interface (
+        .clk         (clk),
+        .rst_n       (rst_n),
 
-        .tile_done (tile_done),
-        .last_pass (last_pass),
+        .data_i      (data_i),
+        .data_o      (data_o),
+        .data_oe     (data_oe),
 
-        .data_out    (accelerator_data_out),
-        .valid_out   (valid_out),
-        .ready_out   (ready_out),
-        .output_done (output_done)
+        .a_valid_i   (a_valid_i),
+        .a_ready_o   (a_ready_o),
+        .a_last_i    (a_last_i),
+
+        .b_valid_i   (b_valid_i),
+        .b_ready_o   (b_ready_o),
+        .b_last_i    (b_last_i),
+
+        .out_valid_o (out_valid_o),
+        .out_ready_i (out_ready_i),
+        .out_last_o  (out_last_o)
     );
-
-        // Intentionally unused digital inputs/status.
-    wire _unused;
-
-    assign _unused = &{
-        1'b0,
-        input_in,
-        output_done
-    };
 
 endmodule
 

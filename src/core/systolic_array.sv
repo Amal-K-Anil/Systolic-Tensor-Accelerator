@@ -1,26 +1,53 @@
+// =======================================================================================
+// systolic_array.sv
+//
+// systolic_array is an ARRAY_SIZE x ARRAY_SIZE grid of mac_unit processing elements,
+// wired in the standard systolic dataflow: a_in flows left to right (row-wise),
+// b_in flows top to bottom (column-wise), each PE forwarding what it received to its
+// eastern/southern neighbour one cycle later. results is the full grid of
+// accumulators, flattened to a single packed bus for output_processor.
+//
+// Operation overview:
+//   a_in/b_in arrive from feeder already diagonally skewed -- row i's element of a
+//   (and column i's element of b) is delayed by i cycles relative to row/column 0,
+//   so that by the time a wavefront of values reaches row r / column c, every PE
+//   along that anti-diagonal receives its correct pair on the same cycle. This
+//   module has no awareness of skewing itself; it only wires PEs together and lets
+//   each one forward its inputs one cycle later, which is what actually produces the
+//   diagonal propagation feeder's skew was designed around.
+//
+//   valid and clear fan out identically to every PE in the array.
+// =======================================================================================
+
+`default_nettype none
+
 module systolic_array #(
     parameter ARRAY_SIZE  = 8,
     parameter DATA_WIDTH  = 8,
     parameter ACCUM_WIDTH = 21
 )(
-    input  logic clk,
-    input  logic rst_n,
+    input  logic                                         clk,
+    input  logic                                         rst_n,
 
-    input  logic [ARRAY_SIZE*DATA_WIDTH-1:0]             a_in,
-    input  logic [ARRAY_SIZE*DATA_WIDTH-1:0]             b_in,
-    input  logic                                         valid,
-    input  logic                                         clear,
-    output logic [ARRAY_SIZE*ARRAY_SIZE*ACCUM_WIDTH-1:0] results
+    input  logic [ARRAY_SIZE*DATA_WIDTH-1:0]             a_in,      // from feeder, packed
+    input  logic [ARRAY_SIZE*DATA_WIDTH-1:0]             b_in,      // from feeder, packed
+    input  logic                                         valid,     // a_in/b_in valid this cycle
+    input  logic                                         clear,     // reset all PEs for next run
+
+    output logic [ARRAY_SIZE*ARRAY_SIZE*ACCUM_WIDTH-1:0] results    // full grid, packed
 );
 
-    logic signed [DATA_WIDTH-1:0] a_in_arr [0:ARRAY_SIZE-1];
-    logic signed [DATA_WIDTH-1:0] b_in_arr [0:ARRAY_SIZE-1];
-
+    logic signed [DATA_WIDTH-1:0]  a_in_arr [0:ARRAY_SIZE-1];
+    logic signed [DATA_WIDTH-1:0]  b_in_arr [0:ARRAY_SIZE-1];
     logic signed [ACCUM_WIDTH-1:0] results_arr [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
 
-    logic signed [DATA_WIDTH-1:0] a_bus [0:ARRAY_SIZE-1][0:ARRAY_SIZE];
-    logic signed [DATA_WIDTH-1:0] b_bus [0:ARRAY_SIZE][0:ARRAY_SIZE-1];
+    logic signed [DATA_WIDTH-1:0]  a_bus [0:ARRAY_SIZE-1][0:ARRAY_SIZE];
+    logic signed [DATA_WIDTH-1:0]  b_bus [0:ARRAY_SIZE][0:ARRAY_SIZE-1];
 
+
+    // ===================================================================================
+    //  Bus Unpacking / Packing
+    // ===================================================================================
     genvar pi, pj;
     generate
         for (pi = 0; pi < ARRAY_SIZE; pi = pi + 1) begin : unpack_inputs
@@ -34,20 +61,20 @@ module systolic_array #(
         end
     endgenerate
 
-    genvar i;
+    genvar i, j;
     generate
         for (i = 0; i < ARRAY_SIZE; i = i + 1) begin : left_edge
             assign a_bus[i][0] = a_in_arr[i];
         end
-    endgenerate
-
-    genvar j;
-    generate
         for (j = 0; j < ARRAY_SIZE; j = j + 1) begin : top_edge
             assign b_bus[0][j] = b_in_arr[j];
         end
     endgenerate
 
+
+    // ===================================================================================
+    //  Processing Element Grid
+    // ===================================================================================
     genvar r, c;
     generate
         for (r = 0; r < ARRAY_SIZE; r = r + 1) begin : gen_rows
@@ -76,3 +103,5 @@ module systolic_array #(
     endgenerate
 
 endmodule
+
+`default_nettype wire

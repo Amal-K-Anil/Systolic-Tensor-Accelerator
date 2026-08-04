@@ -1,0 +1,94 @@
+# Slot A -- standalone development/test slot for Team Maxilerator's systolic
+# array accelerator.
+#
+# This is a SELF-CONTAINED representation of Slot A for our own synthesis/
+# PnR/timing iteration -- not the final multi-team Chipathon padframe. Per
+# the padframe proposal, Slot A occupies one of 4 possible CORNERS of the
+# shared die, at 1/4 the workshop slot's own core area (each core side
+# halved: 2051/2 = 1025.5, rounded down to 1020 for inner-edge margin).
+# A corner block has only 2 outer edges bordering the true die boundary --
+# the other 2 face inward toward neighboring blocks (A/B/C/D/E) and carry no
+# pads at all in the real integrated chip. This slot models that: SOUTH and
+# WEST carry all pads (representing the true die boundary for a bottom-left
+# corner placement); NORTH and EAST are empty (core touches the die edge
+# directly, representing the inward-facing sides). The 442 um border on
+# SOUTH/WEST matches the workshop slot's own border width, since pad cell
+# footprint doesn't shrink with die size.
+#
+# Pad count is exactly 22 (clk_pad/rst_n_pad included in that count, per
+# team decision to treat the full pin budget as inclusive of them), capped
+# at 11 pads per side (SOUTH/WEST) to match the slot's square/symmetrical
+# shape. Power is a single DVDD/DVSS pair (both placed on WEST), a
+# deliberately conservative choice pending real current-draw data from
+# synthesis.
+#
+# Which corner Slot A actually ends up in, and the exact pad indices on the
+# shared padring, are decided at final integration across all teams and
+# are not yet known -- updating DIE_AREA/CORE_AREA/PAD_* to match the real
+# integrated position is a mechanical change once that's decided.
+#
+# Die:  1462 x 1462 um (1020 core + 442 border, on the 2 outer sides only).
+# Pads: 12 bidir  (gf180mcu_fd_io__bi_24t) -- data[7:0] + a_ready_o/b_ready_o/
+#                                              out_valid_o/out_last_o
+#     +  5 input  (gf180mcu_fd_io__in_c)   -- a_valid_i/a_last_i/b_valid_i/
+#                                              b_last_i/out_ready_i
+#     +  1 analog (gf180mcu_fd_io__asig_5p0) -- unused, zero-width-vector
+#                                                 workaround only
+#     +  1 dvdd + 1 dvss
+#     +  2 hardcoded input cells (clk_pad, rst_n_pad)
+#
+# Index mapping (generate loops in chip_top.sv) -- see chip_core.sv's pin
+# map comment for what each input[i]/bidir[i] connects to.
+
+# Floorplanning
+FP_SIZING: absolute
+DIE_AREA:  [0, 0, 1462, 1462]
+CORE_AREA: [442, 442, 1462, 1462]
+
+VERILOG_DEFINES: ["SLOT_A"]
+
+# Pad lists read clockwise from the south-west corner. NORTH and EAST are
+# empty -- those 2 sides face inward toward neighboring blocks in the real
+# integrated die and carry no pads here. Capped at 11 pads per side.
+
+# ----- South: SW -> SE (11 pads) -----
+PAD_SOUTH: [
+    "bidir\\[0\\].pad",
+    "bidir\\[1\\].pad",
+    "bidir\\[2\\].pad",
+    "bidir\\[3\\].pad",
+    "bidir\\[4\\].pad",
+    "bidir\\[5\\].pad",
+    "bidir\\[6\\].pad",
+    "bidir\\[7\\].pad",
+    "bidir\\[10\\].pad",
+    "bidir\\[11\\].pad",
+
+    "inputs\\[4\\].pad",
+]
+
+# ----- East: SE -> NE (empty -- inward-facing side) -----
+PAD_EAST: []
+
+# ----- North: NE -> NW (empty -- inward-facing side) -----
+PAD_NORTH: []
+
+# ----- West: NW -> SW (11 pads) -----
+PAD_WEST: [
+    "dvdd_pads\\[0\\].pad",
+    "dvss_pads\\[0\\].pad",
+
+    "analog\\[0\\].pad",
+
+    rst_n_pad,
+    clk_pad,
+
+    "inputs\\[1\\].pad",
+    "inputs\\[0\\].pad",
+
+    "bidir\\[8\\].pad",
+    "bidir\\[9\\].pad",
+
+    "inputs\\[2\\].pad",
+    "inputs\\[3\\].pad",
+]

@@ -5,7 +5,7 @@ module booth_encoder (
     output logic neg     // subtract (invert + correction)
 );
     always_comb begin
-        unique case (booth_bits)
+        case (booth_bits)
             3'b000, 3'b111: begin zero=1'b1; sel2=1'b0; neg=1'b0; end // 0
             3'b001, 3'b010: begin zero=1'b0; sel2=1'b0; neg=1'b0; end // +M
             3'b011:         begin zero=1'b0; sel2=1'b1; neg=1'b0; end // +2M

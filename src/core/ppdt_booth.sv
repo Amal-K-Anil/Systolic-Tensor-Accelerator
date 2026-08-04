@@ -7,9 +7,12 @@ module partial_product_generator #(
     output logic corr                              // correction bit (deferred +1)
 );
     logic signed [DATA_WIDTH+1:0] mag;
+    logic sign_bit;
+
+    assign sign_bit = multiplicand[DATA_WIDTH-1];
 
     always_comb begin
-        mag     = {{2{multiplicand[DATA_WIDTH-1]}}, multiplicand}; // sign-extend, free
+        mag     = {{2{sign_bit}}, multiplicand};                   // sign-extend, free
         mag     = sel2 ? (mag <<< 1) : mag;                        // free (wire shift)
         pp_row  = zero ? '0 : (neg ? ~mag : mag);                  // XOR invert only
         corr    = (~zero) & neg;                                   // no adder here

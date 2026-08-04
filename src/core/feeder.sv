@@ -1,358 +1,236 @@
-// =============================================================================
-// feeder.sv — Final, Spec-Compliant, Fully Parameterized
-// SSCS Chipathon 2026 | Track A | Team Maxilerator | Owner: Irene
-// Architecture Spec v1.0 Section 4.5
+// =======================================================================================
+// feeder.sv
 //
-// Verified against: feeder_8x8_150_cycle_trace_updated.xlsx
+// Feeder is the data-path entry point of the accelerator_core. It receives two
+// independent AXI4-Stream channels from the host — activation data on the A lane
+// and weight data on the B lane — and reorganizes them into the diagonally skewed
+// wavefront the systolic array needs for output-stationary matrix multiplication.
 //
-// Yosys 0.64 compatibility:
-//   - No SV cast expressions
-//   - No integer loop variables in always blocks
-//   - No unpacked port arrays (a_in/b_in flattened to packed vectors)
-//   - No automatic functions
-//   - rst_n is pure async reset; clear is synchronous
-//   - All skew buffer FFs instantiated via generate — fully parameterized
+// Operation overview:
+//   Each "vector" is one column of A paired with one row of B (ARRAY_SIZE words
+//   per lane). Feeder synchronizes the two lanes so neither can outrun the other
+//   within a vector: a lane that finishes early is held (a_ready/b_ready drop)
+//   until its partner catches up. Once both lanes deliver their 8th word,
+//   vector_done fires and the vector is captured into staging registers.
 //
-// Timing model used by the Excel trace:
-//   * one SRAM address is presented per clock while read_en=1
-//   * sram_data for an address is captured two cycles after that address
-//   * for ARRAY_SIZE=8, normal valid cycles are 17,33,...,129
-//   * skew state advances one clock after each normal-valid pulse
-//   * final drain is 2*(ARRAY_SIZE-1) consecutive valid cycles
-//   * drain_done is a one-clock pulse after the last drain-valid cycle
-//
-// drain_en is sampled on start and belongs to the tile being started.  This is
-// important for back-to-back operation: drain_en may already describe tile 2
-// while the final normal vector of tile 1 is still leaving the feeder.
-// =============================================================================
+//   Every vector shift, staging is pushed one step into a triangular skew
+//   buffer, so row i of the array receives its data i valid cycles after row 0 — 
+//   this is what produces the correct diagonal wavefront. When the host asserts
+//   a_last/b_last on the true final word of each lane, drain_en latches and
+//   feeder self-triggers a 2*(ARRAY_SIZE-1)-cycle flush, injecting zero
+//   wavefronts to push the remaining data out of the skew buffer and array.
+//   drain_done then latches (one cycle after the last flush wavefront, to let
+//   the MAC array's registers settle) so output_processor can safely start.
+// =======================================================================================
 
 `default_nettype none
 
 module feeder #(
-    parameter ARRAY_SIZE = 8
+    parameter ARRAY_SIZE = 8,
+    parameter DATA_WIDTH = 8
 )(
-    input  wire                    clk,
-    input  wire                    rst_n,
+    input  logic                              clk,
+    input  logic                              rst_n,
 
-    // From SRAM
-    input  wire [7:0]              sram_data,
+    // Host Interface - Activation channel (AXI4-Stream, sink side)
+    input  logic [DATA_WIDTH-1:0]             a_data,      // activation word
+    input  logic                              a_valid,     // activation word valid
+    output logic                              a_ready,     // may accept activation word
+    input  logic                              a_last,      // true final word, activation stream
 
-    // To SRAM
-    output wire [6:0]              read_addr,
-    output wire                    read_en,
+    // Host Interface - Weight channel (AXI4-Stream, sink side)
+    input  logic [DATA_WIDTH-1:0]             b_data,      // weight word
+    input  logic                              b_valid,     // weight word valid
+    output logic                              b_ready,     // may accept weight word
+    input  logic                              b_last,      // true final word, weight stream
 
-    // Controller
-    input  wire                    start,
-    input  wire                    drain_en,
-    input  wire                    clear,
+    // Output Processor
+    input  logic                              clear,       // reset pulse, from output_processor
+    output logic                              drain_done,  // safe for output_processor to start
 
-    // Systolic-array inputs. Slice [i*8 +: 8] is lane i.
-    output wire [ARRAY_SIZE*8-1:0] a_in,
-    output wire [ARRAY_SIZE*8-1:0] b_in,
-    output wire                    valid,
-
-    // Controller status
-    output wire                    drain_done
-`ifdef FEEDER_DEBUG
-    ,
-    // ---------------------------------------------------------------------
-    // Simulation-only observability. These ports do not exist unless the
-    // testbench compiles with -DFEEDER_DEBUG.
-    // ---------------------------------------------------------------------
-    output wire [ARRAY_SIZE*8-1:0] dbg_a_stage,
-    output wire [ARRAY_SIZE*8-1:0] dbg_b_stage,
-    output wire [((ARRAY_SIZE*(ARRAY_SIZE-1))/2)*8-1:0] dbg_skew_a,
-    output wire [((ARRAY_SIZE*(ARRAY_SIZE-1))/2)*8-1:0] dbg_skew_b,
-    output wire [6:0]              dbg_read_counter,
-    output wire                    dbg_reading,
-    output wire                    dbg_normal_valid,
-    output wire                    dbg_drain_active,
-    output wire [4:0]              dbg_drain_counter,
-    output wire                    dbg_current_tile_final
-`endif
+    // Systolic Array
+    output logic [ARRAY_SIZE*DATA_WIDTH-1:0]  a_out,       // skewed activation words
+    output logic [ARRAY_SIZE*DATA_WIDTH-1:0]  b_out,       // skewed weight words
+    output logic                              valid        // a_out/b_out valid this cycle
 );
 
-    localparam integer POS_WIDTH     = $clog2(ARRAY_SIZE);
-    localparam integer TILE_BYTES    = 2 * ARRAY_SIZE * ARRAY_SIZE;
-    localparam integer COUNT_WIDTH   = $clog2(TILE_BYTES);
-    localparam integer B_BASE        = ARRAY_SIZE * ARRAY_SIZE;
-    localparam integer SKEW_DEPTH    = (ARRAY_SIZE * (ARRAY_SIZE - 1)) / 2;
-    localparam integer DRAIN_CYCLES  = 2 * (ARRAY_SIZE - 1);
-    localparam integer DRAIN_WIDTH   = $clog2(DRAIN_CYCLES);
+    // ===================================================================================
+    //  Constants
+    // ===================================================================================
+    localparam COUNT_W    = $clog2(ARRAY_SIZE);
+    localparam DRAIN_LEN  = 2 * (ARRAY_SIZE - 1);                 // flush cycles needed
+    localparam DRAIN_W    = $clog2(DRAIN_LEN);
+    localparam SKEW_DEPTH = (ARRAY_SIZE * (ARRAY_SIZE - 1)) / 2;  // sum of rows 1..N-1
 
-    // -------------------------------------------------------------------------
-    // Read sequencer
-    // -------------------------------------------------------------------------
-    reg                     reading;
-    reg [COUNT_WIDTH-1:0]   read_counter;
-    reg                     current_tile_final;
 
-    wire [POS_WIDTH-1:0] pos_now;
-    wire                 phase_now;
-    wire [POS_WIDTH-1:0] k_now;
+    // ===================================================================================
+    //  Input Sync and Handshaking
+    // ===================================================================================
+    logic [COUNT_W-1:0] a_count, b_count;
+    logic a_active, b_active;                // confirmed transfer, this cycle
+    logic a_vector_last, b_vector_last;      // this transfer is the vector's 8th word
+    logic a_vector_last_r, b_vector_last_r;  // this lane's vector done, waiting on partner
+    logic a_last_r, b_last_r;                // this lane's true final word transferred
+    logic vector_done, drain_en;
+    
+    assign a_active = a_valid && a_ready;
+    assign b_active = b_valid && b_ready;
 
-    wire [6:0] pos_ext;
-    wire [6:0] k_ext;
-    wire [6:0] addr_a;
-    wire [6:0] addr_b;
+    assign a_vector_last = a_active && (a_count == COUNT_W'(ARRAY_SIZE-1));
+    assign b_vector_last = b_active && (b_count == COUNT_W'(ARRAY_SIZE-1));
 
-    assign pos_now   = read_counter[POS_WIDTH-1:0];
-    assign phase_now = read_counter[POS_WIDTH];
-    assign k_now     = read_counter >> (POS_WIDTH + 1);
+    assign vector_done = (a_vector_last_r || a_vector_last) && (b_vector_last_r || b_vector_last);  // both lanes, now or latched
+    assign drain_en    = (a_last_r || a_last) && (b_last_r || b_last);                              // stays high until clear
 
-    assign pos_ext = {{(7-POS_WIDTH){1'b0}}, pos_now};
-    assign k_ext   = {{(7-POS_WIDTH){1'b0}}, k_now};
+    assign a_ready = !a_vector_last_r && !a_last_r;
+    assign b_ready = !b_vector_last_r && !b_last_r;
 
-    // A is stored row-major at [0, N^2-1].
-    // For inner step k, read A[row][k], row=0..N-1.
-    assign addr_a = (pos_ext << POS_WIDTH) + k_ext;
-
-    // B is stored row-major at [N^2, 2*N^2-1].
-    // For inner step k, read B[k][col], col=0..N-1.
-    assign addr_b = B_BASE + (k_ext << POS_WIDTH) + pos_ext;
-
-    assign read_addr = phase_now ? addr_b : addr_a;
-    assign read_en   = reading;
-
-    always @(posedge clk or negedge rst_n) begin
+    always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            reading           <= 1'b0;
-            read_counter      <= {COUNT_WIDTH{1'b0}};
-            current_tile_final <= 1'b0;
+            a_count         <= '0;
+            b_count         <= '0;
+            a_vector_last_r <= 1'b0;
+            b_vector_last_r <= 1'b0;
+            a_last_r        <= 1'b0;
+            b_last_r        <= 1'b0;
         end else if (clear) begin
-            reading           <= 1'b0;
-            read_counter      <= {COUNT_WIDTH{1'b0}};
-            current_tile_final <= 1'b0;
+            a_count         <= '0;
+            b_count         <= '0;
+            a_vector_last_r <= 1'b0;
+            b_vector_last_r <= 1'b0;
+            a_last_r        <= 1'b0;
+            b_last_r        <= 1'b0;
         end else begin
-            if (start) begin
-                reading            <= 1'b1;
-                read_counter       <= {COUNT_WIDTH{1'b0}};
-                current_tile_final <= drain_en;
-            end else if (reading) begin
-                if (read_counter == TILE_BYTES - 1) begin
-                    reading      <= 1'b0;
-                    read_counter <= read_counter;
-                end else begin
-                    read_counter <= read_counter + {{(COUNT_WIDTH-1){1'b0}}, 1'b1};
-                end
+
+            if (a_active)
+                a_count <= a_vector_last ? '0 : (a_count + 1'b1);
+            if (b_active)
+                b_count <= b_vector_last ? '0 : (b_count + 1'b1);
+
+            if (vector_done) begin
+                a_vector_last_r <= 1'b0;
+                b_vector_last_r <= 1'b0;
+            end else begin
+                if (a_vector_last) 
+                    a_vector_last_r <= 1'b1;
+                if (b_vector_last) 
+                    b_vector_last_r <= 1'b1;
             end
+
+            if (a_last) 
+                a_last_r <= 1'b1;
+            if (b_last)
+                b_last_r <= 1'b1;
+
         end
     end
 
-    // -------------------------------------------------------------------------
-    // Metadata shadow for the two-cycle SRAM path
-    //
-    // Address X is visible during cycle N.  At the N+1 edge its lane metadata
-    // enters this register.  At the N+2 edge, the staging register captures
-    // sram_data using this metadata.  A second metadata register would add an
-    // unwanted third capture cycle.
-    // -------------------------------------------------------------------------
-    reg                   cap_en_d1;
-    reg                   phase_d1;
-    reg [POS_WIDTH-1:0]   pos_d1;
 
-    always @(posedge clk or negedge rst_n) begin
+    // ===================================================================================
+    //  Drain Sequencer
+    // ===================================================================================
+    logic drain_en_r;                 // flush currently in progress
+    logic [DRAIN_W-1:0] drain_count;
+
+    always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            cap_en_d1 <= 1'b0;
-            phase_d1  <= 1'b0;
-            pos_d1    <= {POS_WIDTH{1'b0}};
+            drain_en_r  <= 1'b0;
+            drain_count <= '0;
+            drain_done  <= 1'b0;
         end else if (clear) begin
-            cap_en_d1 <= 1'b0;
-            phase_d1  <= 1'b0;
-            pos_d1    <= {POS_WIDTH{1'b0}};
+            drain_en_r  <= 1'b0;
+            drain_count <= '0;
+            drain_done  <= 1'b0;
         end else begin
-            cap_en_d1 <= reading;
-            if (reading) begin
-                phase_d1 <= phase_now;
-                pos_d1   <= pos_now;
+            if (drain_en && !drain_en_r && drain_count == '0)
+                drain_en_r <= 1'b1;
+            else if (drain_en_r) begin
+                if (drain_count == DRAIN_W'(DRAIN_LEN - 1))
+                    drain_en_r <= 1'b0;
+                else
+                    drain_count <= drain_count + 1'b1;
             end
+            drain_done <= !drain_en_r && (drain_count == DRAIN_W'(DRAIN_LEN - 1));
         end
     end
 
-    // This registered pulse becomes high in the same displayed cycle in which
-    // the last B staging word of an inner step has just been captured.
-    reg normal_valid_r;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            normal_valid_r <= 1'b0;
-        else if (clear)
-            normal_valid_r <= 1'b0;
-        else
-            normal_valid_r <= cap_en_d1 && phase_d1 &&
-                              (pos_d1 == ARRAY_SIZE - 1);
-    end
+    // ===================================================================================
+    //  Staging Registers
+    // ===================================================================================
+    logic [DATA_WIDTH-1:0] a_stage [0:ARRAY_SIZE-1];
+    logic [DATA_WIDTH-1:0] b_stage [0:ARRAY_SIZE-1];
 
-    // -------------------------------------------------------------------------
-    // Drain control
-    // -------------------------------------------------------------------------
-    reg                    drain_active;
-    reg [DRAIN_WIDTH-1:0]  drain_counter;
-    reg                    drain_done_r;
-
-    // normal_valid_r is high for the completed tile during the cycle before
-    // the first drain wavefront. current_tile_final was latched at that tile's
-    // start, so a next tile's drain_en cannot accidentally drain this tile.
-    wire drain_begin;
-    assign drain_begin = normal_valid_r && !reading &&
-                         current_tile_final && !drain_active;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            drain_active  <= 1'b0;
-            drain_counter <= {DRAIN_WIDTH{1'b0}};
-            drain_done_r  <= 1'b0;
-        end else if (clear) begin
-            drain_active  <= 1'b0;
-            drain_counter <= {DRAIN_WIDTH{1'b0}};
-            drain_done_r  <= 1'b0;
-        end else begin
-            drain_done_r <= 1'b0;
-
-            if (drain_begin) begin
-                drain_active  <= 1'b1;
-                drain_counter <= {DRAIN_WIDTH{1'b0}};
-            end else if (drain_active) begin
-                if (drain_counter == DRAIN_CYCLES - 1) begin
-                    drain_active <= 1'b0;
-                    drain_done_r <= 1'b1;
-                end else begin
-                    drain_counter <= drain_counter +
-                                     {{(DRAIN_WIDTH-1){1'b0}}, 1'b1};
-                end
-            end
-        end
-    end
-
-    assign drain_done = drain_done_r;
-    assign valid      = normal_valid_r | drain_active;
-
-    // -------------------------------------------------------------------------
-    // Staging registers
-    // -------------------------------------------------------------------------
-    reg [7:0] A_stage [0:ARRAY_SIZE-1];
-    reg [7:0] B_stage [0:ARRAY_SIZE-1];
-
-    genvar st;
+    genvar pos;
     generate
-        for (st = 0; st < ARRAY_SIZE; st = st + 1) begin : g_staging
-            always @(posedge clk or negedge rst_n) begin
+        for (pos = 0; pos < ARRAY_SIZE; pos = pos + 1) begin : g_stage
+            always_ff @(posedge clk or negedge rst_n) begin
                 if (!rst_n) begin
-                    A_stage[st] <= 8'd0;
-                    B_stage[st] <= 8'd0;
+                    a_stage[pos] <= '0;
+                    b_stage[pos] <= '0;
                 end else if (clear) begin
-                    A_stage[st] <= 8'd0;
-                    B_stage[st] <= 8'd0;
-                end else if (drain_begin) begin
-                    // At this edge, the skew pipeline still sees the old, final
-                    // staging vector (nonblocking assignment semantics).  After
-                    // the edge, row/column 0 is zero for drain cycle 1.
-                    A_stage[st] <= 8'd0;
-                    B_stage[st] <= 8'd0;
+                    a_stage[pos] <= '0;
+                    b_stage[pos] <= '0;
+                end else if (drain_en_r) begin
+                    a_stage[pos] <= '0;  // flush: zeros for skew buffer to shift out
+                    b_stage[pos] <= '0;
                 end else begin
-                    if (cap_en_d1 && !phase_d1 && (pos_d1 == st))
-                        A_stage[st] <= sram_data;
-                    if (cap_en_d1 &&  phase_d1 && (pos_d1 == st))
-                        B_stage[st] <= sram_data;
+                    if (a_active && (a_count == COUNT_W'(pos)))
+                        a_stage[pos] <= a_data;
+                    if (b_active && (b_count == COUNT_W'(pos)))
+                        b_stage[pos] <= b_data;
                 end
             end
         end
     endgenerate
 
-    // -------------------------------------------------------------------------
-    // Triangular skew buffer
-    //
-    // Row/column i has i register stages: total N*(N-1)/2 stages per side.
-    // A completed normal vector is shifted one clock after its valid pulse.
-    // This lets the systolic array consume the current wavefront while the
-    // feeder prepares the next one. During drain, a zero vector shifts every
-    // clock.
-    // -------------------------------------------------------------------------
-    reg [7:0] skew_A [0:SKEW_DEPTH-1];
-    reg [7:0] skew_B [0:SKEW_DEPTH-1];
 
-    wire skew_shift;
-    assign skew_shift = normal_valid_r | drain_active;
+    // ===================================================================================
+    //  Skew Buffer
+    // ===================================================================================
+    logic [DATA_WIDTH-1:0] a_skew [0:SKEW_DEPTH-1];
+    logic [DATA_WIDTH-1:0] b_skew [0:SKEW_DEPTH-1];
 
-    genvar row;
-    genvar depth;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)      valid <= 1'b0;
+        else if (clear)  valid <= 1'b0;
+        else             valid <= vector_done || drain_en_r;
+    end
+
+    // row 0: no register, direct read from staging
+    assign a_out[0 +: DATA_WIDTH] = a_stage[0];
+    assign b_out[0 +: DATA_WIDTH] = b_stage[0];
+
+    genvar row, stage;
     generate
-        for (row = 1; row < ARRAY_SIZE; row = row + 1) begin : g_skew_row
-            localparam integer ROW_BASE = (row * (row - 1)) / 2;
+        for (row = 1; row < ARRAY_SIZE; row = row + 1) begin : g_row
+            localparam integer ROW_BASE = (row * (row - 1)) / 2;  // rows 1..N-1 have i stages
 
-            always @(posedge clk or negedge rst_n) begin
-                if (!rst_n) begin
-                    skew_A[ROW_BASE] <= 8'd0;
-                    skew_B[ROW_BASE] <= 8'd0;
-                end else if (clear) begin
-                    skew_A[ROW_BASE] <= 8'd0;
-                    skew_B[ROW_BASE] <= 8'd0;
-                end else if (skew_shift) begin
-                    skew_A[ROW_BASE] <= A_stage[row];
-                    skew_B[ROW_BASE] <= B_stage[row];
-                end
-            end
-
-            for (depth = 1; depth < row; depth = depth + 1) begin : g_skew_depth
-                always @(posedge clk or negedge rst_n) begin
+            for (stage = 0; stage < row; stage = stage + 1) begin : g_stage_row
+                always_ff @(posedge clk or negedge rst_n) begin
                     if (!rst_n) begin
-                        skew_A[ROW_BASE + depth] <= 8'd0;
-                        skew_B[ROW_BASE + depth] <= 8'd0;
+                        a_skew[ROW_BASE+stage] <= '0;
+                        b_skew[ROW_BASE+stage] <= '0;
                     end else if (clear) begin
-                        skew_A[ROW_BASE + depth] <= 8'd0;
-                        skew_B[ROW_BASE + depth] <= 8'd0;
-                    end else if (skew_shift) begin
-                        skew_A[ROW_BASE + depth] <= skew_A[ROW_BASE + depth - 1];
-                        skew_B[ROW_BASE + depth] <= skew_B[ROW_BASE + depth - 1];
+                        a_skew[ROW_BASE+stage] <= '0;
+                        b_skew[ROW_BASE+stage] <= '0;
+                    end else if (valid) begin
+                        if (stage == 0) begin
+                            a_skew[ROW_BASE] <= a_stage[row];
+                            b_skew[ROW_BASE] <= b_stage[row];
+                        end else begin
+                            a_skew[ROW_BASE+stage] <= a_skew[ROW_BASE+stage-1];
+                            b_skew[ROW_BASE+stage] <= b_skew[ROW_BASE+stage-1];
+                        end
                     end
                 end
             end
+
+            assign a_out[row*DATA_WIDTH +: DATA_WIDTH] = a_skew[ROW_BASE+row-1];
+            assign b_out[row*DATA_WIDTH +: DATA_WIDTH] = b_skew[ROW_BASE+row-1];
         end
     endgenerate
-
-    // -------------------------------------------------------------------------
-    // Packed outputs
-    // -------------------------------------------------------------------------
-    assign a_in[0 +: 8] = A_stage[0];
-    assign b_in[0 +: 8] = B_stage[0];
-
-    genvar out_lane;
-    generate
-        for (out_lane = 1; out_lane < ARRAY_SIZE; out_lane = out_lane + 1) begin : g_outputs
-            localparam integer OUT_INDEX =
-                (out_lane * (out_lane - 1)) / 2 + out_lane - 1;
-            assign a_in[out_lane*8 +: 8] = skew_A[OUT_INDEX];
-            assign b_in[out_lane*8 +: 8] = skew_B[OUT_INDEX];
-        end
-    endgenerate
-
-
-`ifdef FEEDER_DEBUG
-    // -------------------------------------------------------------------------
-    // Debug flattening. The packed order is deliberately simple:
-    //   dbg_a_stage[i*8 +: 8] = A_stage[i]
-    //   dbg_skew_a[j*8 +: 8]  = skew_A[j]
-    // This lets cocotb compare every internal register every clock.
-    // -------------------------------------------------------------------------
-    genvar dbg_i;
-    generate
-        for (dbg_i = 0; dbg_i < ARRAY_SIZE; dbg_i = dbg_i + 1) begin : g_dbg_stage
-            assign dbg_a_stage[dbg_i*8 +: 8] = A_stage[dbg_i];
-            assign dbg_b_stage[dbg_i*8 +: 8] = B_stage[dbg_i];
-        end
-        for (dbg_i = 0; dbg_i < SKEW_DEPTH; dbg_i = dbg_i + 1) begin : g_dbg_skew
-            assign dbg_skew_a[dbg_i*8 +: 8] = skew_A[dbg_i];
-            assign dbg_skew_b[dbg_i*8 +: 8] = skew_B[dbg_i];
-        end
-    endgenerate
-
-    assign dbg_read_counter       = {{(7-COUNT_WIDTH){1'b0}}, read_counter};
-    assign dbg_reading            = reading;
-    assign dbg_normal_valid       = normal_valid_r;
-    assign dbg_drain_active       = drain_active;
-    assign dbg_drain_counter      = {{(5-DRAIN_WIDTH){1'b0}}, drain_counter};
-    assign dbg_current_tile_final = current_tile_final;
-`endif
 
 endmodule
+
 `default_nettype wire

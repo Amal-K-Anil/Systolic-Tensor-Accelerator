@@ -26,32 +26,17 @@ meta:
 
 DESIGN_NAME: chip_top
 VERILOG_FILES:
-# Accelerator RTL
 - dir::../src/core/booth_encoder.sv
 - dir::../src/core/ppdt_booth.sv
 - dir::../src/core/booth_multiplier.sv
 - dir::../src/core/mac_unit.sv
 - dir::../src/core/systolic_array.sv
-- dir::../src/core/output_processor.sv
 - dir::../src/core/feeder.sv
+- dir::../src/core/output_processor.sv
 - dir::../src/core/accelerator_core.sv
-
-# Chipathon host/padring wrapper
 - dir::../src/chipathon_wrapper/host_interface.sv
 - dir::../src/chipathon_wrapper/chip_core.sv
 - dir::../src/chipathon_wrapper/chip_top.sv
-
-# Allows chip_top.sv to find slot_defines.svh
-VERILOG_INCLUDE_DIRS:
-  - dir::../src/chipathon_wrapper
-  - dir::../src/core
-
-# Select the 1x1 slot
-VERILOG_DEFINES:
-  - SLOT_A
-
-# Enables VDD/VSS ports in chip_top and chip_core
-VERILOG_POWER_DEFINE: USE_POWER_PINS
 
 # Enable plugin for better SystemVerilog support
 # USE_SLANG: True
@@ -198,9 +183,9 @@ MACROS:
         location: ["expr::$DIE_AREA[2] + -169.25", "expr::$DIE_AREA[3] + -169.25"]
         orientation: N
 
-# No user macros for the workshop slot -- the core is a trivial
-# counter.  chip_id + wafer.space logo (above) are the only placed
-# macros.
+# No user macros needed beyond chip_id + wafer.space logo (above),
+# regardless of which slot is active -- neither our accelerator core
+# nor any other slot sharing this config requires additional IP macros.
 
 # No macro PDN connections needed beyond what the PDN grid already
 # supplies through chip_id / logo.  Keep the key as an empty list so

@@ -2,148 +2,159 @@
 # Shared cocotb testbench runner for Systolic-Tensor-Accelerator
 #
 # Usage:
-#   make TOPLEVEL=<module>         Run testbench for specific module
-#   make all                       Run all unit testbenches
-#   make all-integration           Run all integration testbenches
+#   make TOPLEVEL=<module>
+#   make all
+#   make all-integration
 #
 # Examples:
 #   make TOPLEVEL=mac_unit
-#   make TOPLEVEL=controller
 #   make TOPLEVEL=accelerator_core
+#   make TOPLEVEL=chip_top
 
 # ========================
 # Simulator Configuration
 # ========================
-SIM          ?= icarus
+SIM           ?= icarus
+TOPLEVEL_LANG ?= verilog
+
 COMPILE_ARGS += -g2012
 COMPILE_ARGS += -DFUNCTIONAL
 
 # ========================
+# Project Paths
+# ========================
+PROJECT_ROOT := $(abspath ..)
+
+TIMESCALE   := $(abspath timescale.v)
+CORE_DIR    := $(PROJECT_ROOT)/src/core
+WRAPPER_DIR := $(PROJECT_ROOT)/src/chipathon_wrapper
+AXI_DIR     := $(PROJECT_ROOT)/src/axi_wrapper
+IP_DIR      := $(PROJECT_ROOT)/ip
+
+# Local PDK clone created with:
+#   cd $(PROJECT_ROOT) && make clone-pdk
+GF180_PDK_ROOT := $(PROJECT_ROOT)/gf180mcu/gf180mcuD
+GF180_IO_DIR   := $(GF180_PDK_ROOT)/libs.ref/gf180mcu_fd_io/verilog
+
+GF180_IO_MODEL := $(GF180_IO_DIR)/gf180mcu_fd_io.v
+GF180_WS_IO_MODEL := $(GF180_IO_DIR)/gf180mcu_ws_io__blackbox.v
+
+GF180_CHIP_ID_MODEL := \
+	$(IP_DIR)/gf180mcu_ws_ip__id/vh/gf180mcu_ws_ip__id.v
+
+GF180_LOGO_MODEL := \
+	$(IP_DIR)/gf180mcu_ws_ip__logo/vh/gf180mcu_ws_ip__logo.v
+
+# Allows chip_top.sv to resolve:
+#   `include "slot_defines.svh"
+COMPILE_ARGS += -I$(WRAPPER_DIR)
+
+# ========================
 # Shared Sources
 # ========================
-TIMESCALE     = $(abspath timescale.v)
-CORE_DIR      = $(abspath ../src/core)
-WRAPPER_DIR   = $(abspath ../src/chipathon_wrapper)
-AXI_DIR       = $(abspath ../src/axi_wrapper)
+VERILOG_SOURCES := $(TIMESCALE)
 
-VERILOG_SOURCES = $(TIMESCALE)
+# ========================
+# Reusable Source Groups
+# ========================
+BOOTH_SOURCES := \
+	$(CORE_DIR)/booth_encoder.sv \
+	$(CORE_DIR)/ppdt_booth.sv \
+	$(CORE_DIR)/booth_multiplier.sv
+
+MAC_SOURCES := \
+	$(BOOTH_SOURCES) \
+	$(CORE_DIR)/mac_unit.sv
+
+ACCELERATOR_SOURCES := \
+	$(MAC_SOURCES) \
+	$(CORE_DIR)/systolic_array.sv \
+	$(CORE_DIR)/feeder.sv \
+	$(CORE_DIR)/output_processor.sv \
+	$(CORE_DIR)/accelerator_core.sv
 
 # ========================
 # Per-Module Configuration
 # ========================
-ifeq ($(TOPLEVEL), mac_unit)
-    MODULE           = tb_mac_unit
-    VERILOG_SOURCES += $(CORE_DIR)/booth_encoder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/ppdt_booth.sv
-    VERILOG_SOURCES += $(CORE_DIR)/booth_multiplier.sv
-    VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
+ifeq ($(TOPLEVEL),mac_unit)
 
-else ifeq ($(TOPLEVEL), systolic_array)
-    MODULE           = tb_systolic_array
-    VERILOG_SOURCES += $(CORE_DIR)/booth_encoder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/ppdt_booth.sv
-    VERILOG_SOURCES += $(CORE_DIR)/booth_multiplier.sv
-    VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
-    VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
+	COCOTB_TEST_MODULES = tb_mac_unit
+	VERILOG_SOURCES += $(MAC_SOURCES)
 
-else ifeq ($(TOPLEVEL), feeder)
-    MODULE           = tb_feeder
-    VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
+else ifeq ($(TOPLEVEL),systolic_array)
 
-else ifeq ($(TOPLEVEL), memory)
-    MODULE           = tb_memory
-    VERILOG_SOURCES += /foss/pdks/ciel/gf180mcu/versions/7b70722e33c03fcb5dabcf4d479fb0822d9251c9/gf180mcuD/libs.ref/gf180mcu_fd_ip_sram/verilog/gf180mcu_fd_ip_sram__sram128x8m8wm1.v
-    VERILOG_SOURCES += $(CORE_DIR)/memory.sv
+	COCOTB_TEST_MODULES = tb_systolic_array
+	VERILOG_SOURCES += $(MAC_SOURCES)
+	VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
 
-else ifeq ($(TOPLEVEL), controller)
-    MODULE           = tb_controller
-    VERILOG_SOURCES += $(CORE_DIR)/controller.sv
+else ifeq ($(TOPLEVEL),feeder)
 
-else ifeq ($(TOPLEVEL), output_processor)
-    MODULE           = tb_output_processor
-    VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
-    VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
-    VERILOG_SOURCES += $(CORE_DIR)/output_processor.sv
+	COCOTB_TEST_MODULES = tb_feeder
+	VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
 
-else ifeq ($(TOPLEVEL), accelerator_core)
-    MODULE           = tb_accelerator_core
+else ifeq ($(TOPLEVEL),output_processor)
 
-    # Feeder simulation-only debug ports.
-    COMPILE_ARGS    += -DFEEDER_DEBUG
+	COCOTB_TEST_MODULES = tb_output_processor
+	VERILOG_SOURCES += $(CORE_DIR)/output_processor.sv
 
-    # Excel and current architecture use the 8x8 configuration.
-    COMPILE_ARGS    += -Paccelerator_core.ARRAY_SIZE=8
+else ifeq ($(TOPLEVEL),accelerator_core)
 
-   # VERILOG_SOURCES += $(CURDIR)/models/gf180_sram128x8_functional.v
-    VERILOG_SOURCES += /foss/pdks/ciel/gf180mcu/versions/7b70722e33c03fcb5dabcf4d479fb0822d9251c9/gf180mcuD/libs.ref/gf180mcu_fd_ip_sram/verilog/gf180mcu_fd_ip_sram__sram128x8m8wm1.v
+	COCOTB_TEST_MODULES = tb_accelerator_core
+	VERILOG_SOURCES += $(ACCELERATOR_SOURCES)
 
-    VERILOG_SOURCES += $(CORE_DIR)/booth_encoder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/ppdt_booth.sv
-    VERILOG_SOURCES += $(CORE_DIR)/booth_multiplier.sv
-    VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
-    VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
-    VERILOG_SOURCES += $(CORE_DIR)/output_processor.sv
-    VERILOG_SOURCES += $(CORE_DIR)/memory.sv
-    VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/controller.sv
-    VERILOG_SOURCES += $(CORE_DIR)/accelerator_core.sv
+else ifeq ($(TOPLEVEL),chip_top)
 
+	COCOTB_TEST_MODULES = chip_top_tb
 
-else ifeq ($(TOPLEVEL), accelerator_top)
-    MODULE           = tb_accelerator_top
-    VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
-    VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
-    VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/memory.sv
-    VERILOG_SOURCES += $(CORE_DIR)/controller.sv
-    VERILOG_SOURCES += $(CORE_DIR)/output_processor.sv
-    VERILOG_SOURCES += $(CORE_DIR)/accelerator_core.sv
-    VERILOG_SOURCES += $(WRAPPER_DIR)/host_interface.sv
-    VERILOG_SOURCES += $(WRAPPER_DIR)/accelerator_top.sv
+	# Select the Slot A definitions in slot_defines.svh.
+	COMPILE_ARGS += -DSLOT_A
 
-else ifeq ($(TOPLEVEL), chip_top)
-    MODULE           = chip_top_tb
-    VERILOG_SOURCES += $(WRAPPER_DIR)/slot_defines.svh
-    VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
-    VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
-    VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/memory.sv
-    VERILOG_SOURCES += $(CORE_DIR)/controller.sv
-    VERILOG_SOURCES += $(CORE_DIR)/output_processor.sv
-    VERILOG_SOURCES += $(CORE_DIR)/accelerator_core.sv
-    VERILOG_SOURCES += $(WRAPPER_DIR)/host_interface.sv
-    VERILOG_SOURCES += $(WRAPPER_DIR)/accelerator_top.sv
-    VERILOG_SOURCES += $(WRAPPER_DIR)/chip_core.sv
-    VERILOG_SOURCES += $(WRAPPER_DIR)/chip_top.sv
+	# Allow includes used by the GF180 I/O model.
+	COMPILE_ARGS += -I$(GF180_IO_DIR)
 
-else ifeq ($(TOPLEVEL), accelerator_axi_wrapper)
-    MODULE           = tb_axi_wrapper
-    VERILOG_SOURCES += $(CORE_DIR)/mac_unit.sv
-    VERILOG_SOURCES += $(CORE_DIR)/systolic_array.sv
-    VERILOG_SOURCES += $(CORE_DIR)/feeder.sv
-    VERILOG_SOURCES += $(CORE_DIR)/memory.sv
-    VERILOG_SOURCES += $(CORE_DIR)/controller.sv
-    VERILOG_SOURCES += $(CORE_DIR)/output_processor.sv
-    VERILOG_SOURCES += $(CORE_DIR)/accelerator_core.sv
-    VERILOG_SOURCES += $(AXI_DIR)/axi4_stream_slave.sv
-    VERILOG_SOURCES += $(AXI_DIR)/axi4_stream_master.sv
-    VERILOG_SOURCES += $(AXI_DIR)/accelerator_axi_wrapper.sv
+	# Functional signal-pad model and wafer.space physical macro views.
+	VERILOG_SOURCES += $(GF180_IO_MODEL)
+	VERILOG_SOURCES += $(GF180_WS_IO_MODEL)
+	VERILOG_SOURCES += $(GF180_CHIP_ID_MODEL)
+	VERILOG_SOURCES += $(GF180_LOGO_MODEL)
+
+	# Full hierarchy:
+	# chip_top -> chip_core -> host_interface -> accelerator_core
+	VERILOG_SOURCES += $(ACCELERATOR_SOURCES)
+	VERILOG_SOURCES += $(WRAPPER_DIR)/host_interface.sv
+	VERILOG_SOURCES += $(WRAPPER_DIR)/chip_core.sv
+	VERILOG_SOURCES += $(WRAPPER_DIR)/chip_top.sv
+
+else ifeq ($(TOPLEVEL),accelerator_axi_wrapper)
+
+	COCOTB_TEST_MODULES = tb_axi_wrapper
+	VERILOG_SOURCES += $(ACCELERATOR_SOURCES)
+	VERILOG_SOURCES += $(AXI_DIR)/axi4_stream_slave.sv
+	VERILOG_SOURCES += $(AXI_DIR)/axi4_stream_master.sv
+	VERILOG_SOURCES += $(AXI_DIR)/accelerator_axi_wrapper.sv
 
 else ifdef TOPLEVEL
-    $(error Unknown TOPLEVEL='$(TOPLEVEL)'. \
-        Valid options: mac_unit systolic_array feeder memory \
-        controller output_processor accelerator_core \
-        accelerator_top chip_top accelerator_axi_wrapper)
+
+	$(error Unknown TOPLEVEL='$(TOPLEVEL)'. \
+	Valid options: mac_unit systolic_array feeder \
+	output_processor accelerator_core chip_top \
+	accelerator_axi_wrapper)
+
 endif
 
 # ========================
 # Run All Targets
 # ========================
-UNIT_MODULES = mac_unit systolic_array feeder memory \
-               controller output_processor
+UNIT_MODULES := \
+	mac_unit \
+	systolic_array \
+	feeder \
+	output_processor
 
-INTEGRATION_MODULES = accelerator_core accelerator_top \
-                      chip_top accelerator_axi_wrapper
+INTEGRATION_MODULES := \
+	accelerator_core \
+	chip_top \
+	accelerator_axi_wrapper
 
 .PHONY: all all-integration clean help
 
@@ -153,7 +164,8 @@ all: ## Run all unit testbenches
 		echo "========================================"; \
 		echo " Running: $$m"; \
 		echo "========================================"; \
-		$(MAKE) TOPLEVEL=$$m || exit 1; \
+		$(MAKE) clean; \
+		$(MAKE) TOPLEVEL=$$m sim || exit 1; \
 	done
 
 all-integration: ## Run all integration testbenches
@@ -162,7 +174,8 @@ all-integration: ## Run all integration testbenches
 		echo "========================================"; \
 		echo " Running: $$m"; \
 		echo "========================================"; \
-		$(MAKE) TOPLEVEL=$$m || exit 1; \
+		$(MAKE) clean; \
+		$(MAKE) TOPLEVEL=$$m sim || exit 1; \
 	done
 
 clean:: ## Remove all simulation build artifacts
@@ -179,7 +192,8 @@ help: ## Show this help message
 	@echo ""
 	@echo "Targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
+		awk 'BEGIN {FS = ":.*?## "}; \
+		{printf "  %-20s %s\n", $$1, $$2}'
 
 # ========================
 # cocotb Makefile Include

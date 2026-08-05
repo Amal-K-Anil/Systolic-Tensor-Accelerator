@@ -1,7 +1,7 @@
 // =======================================================================================
 // output_processor.sv
 //
-// Output processor serializes the systolic array's accumulator results into a
+// output_processor serializes the systolic array's accumulator results into a
 // byte-wide AXI4-Stream output, one result per cycle, row-major across the array
 // (row 0 col 0, row 0 col 1, ... row N-1 col N-1). Each result is optionally
 // shifted (SHIFT_BITS) then saturated to [SAT_MIN, SAT_MAX] before truncation to
@@ -49,21 +49,54 @@ module output_processor #(
 );
 
     localparam COUNT_W = $clog2(ARRAY_SIZE);
-    localparam INDEX_W = $clog2(ARRAY_SIZE * ARRAY_SIZE);
-
     localparam [DATA_WIDTH-1:0] OUT_MAX = DATA_WIDTH'(SAT_MAX);
     localparam [DATA_WIDTH-1:0] OUT_MIN = DATA_WIDTH'(SAT_MIN);
 
+    logic [COUNT_W-1:0] row, col;
+
 
     // ===================================================================================
-    //  Result Selection and Quantization
+    //  Result Unpacking
     // ===================================================================================
-    logic [COUNT_W-1:0]            row, col;
-    logic [INDEX_W-1:0]            index;
-    logic signed [ACCUM_WIDTH-1:0] raw_result, shifted_result;
+    logic signed [ACCUM_WIDTH-1:0] result_matrix [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+   
+    genvar ur, uc;
+    generate
+        for (ur = 0; ur < ARRAY_SIZE; ur = ur + 1) begin : gen_unpack_row
+            for (uc = 0; uc < ARRAY_SIZE; uc = uc + 1) begin : gen_unpack_col
+                localparam integer RESULT_INDEX = ur * ARRAY_SIZE + uc;
+                assign result_matrix[ur][uc] = $signed(results[RESULT_INDEX * ACCUM_WIDTH +: ACCUM_WIDTH]);
+            end
+        end
+    endgenerate
 
-    assign index          = row * ARRAY_SIZE + col;
-    assign raw_result     = results[index * ACCUM_WIDTH +: ACCUM_WIDTH];
+
+    // ===================================================================================
+    //  Result Selection
+    // ===================================================================================
+    logic signed [ACCUM_WIDTH-1:0] selected_row [0:ARRAY_SIZE-1];
+    logic signed [ACCUM_WIDTH-1:0] raw_result;
+    integer sel_row, sel_col;
+
+    always_comb begin
+        raw_result = '0;
+        for (sel_col = 0; sel_col < ARRAY_SIZE; sel_col = sel_col + 1) begin
+            selected_row[sel_col] = '0;
+            for (sel_row = 0; sel_row < ARRAY_SIZE; sel_row = sel_row + 1) begin
+                if (row == COUNT_W'(sel_row))
+                    selected_row[sel_col] = result_matrix[sel_row][sel_col];
+            end
+            if (col == COUNT_W'(sel_col))
+                raw_result = selected_row[sel_col];
+        end
+    end
+
+
+    // ===================================================================================
+    //  Quantization
+    // ===================================================================================
+    logic signed [ACCUM_WIDTH-1:0] shifted_result;
+
     assign shifted_result = raw_result >>> SHIFT_BITS;
 
     assign out_data = (shifted_result > SAT_MAX) ? OUT_MAX :

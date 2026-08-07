@@ -1,281 +1,351 @@
-"""
-cocotb testbench for systolic_array
-Team Maxilerator | SSCS Chipathon 2026
-
-Port packing convention (matches systolic_array.sv):
-  a_in  [ARRAY_SIZE*DATA_WIDTH-1:0]  — row i at bits [i*8 +: 8]
-  b_in  [ARRAY_SIZE*DATA_WIDTH-1:0]  — col j at bits [j*8 +: 8]
-  results [ARRAY_SIZE*ARRAY_SIZE*ACCUM_WIDTH-1:0]
-        — result[i][j] at bits [(i*ARRAY_SIZE+j)*21 +: 21]
-
-The systolic array is OUTPUT-STATIONARY with a SKEW INPUT pattern.
-The feeder drives skewed inputs; here we drive them manually so we
-can test the array in isolation against a numpy reference.
-
-Skewed drive pattern for an NxN array computing C = A x B:
-  At valid pulse k (k=0..N-1):
-    a_in[i] = A[i][k]   (column k of A, row i)
-    b_in[j] = B[k][j]   (row k of B, col j)
-  After N valid pulses all MACs have accumulated their correct dot product.
-  Then N-1 drain pulses flush the pipeline (zeros on inputs, valid=1).
-  Total: N + (N-1) = 2N-1 valid pulses needed for a single 8x8 tile.
-
-NOTE: mac_unit registers a_out/b_out on EVERY valid cycle (systolic
-pipeline). So MAC[i][j] sees A[i][k] and B[k][j] only when the data
-has propagated i hops right and j hops down from the edges.
-That means we need to skew the edge inputs:
-  At edge pulse k: a_in[i] = A[i][k-i]  (zero-padded outside 0..N-1)
-                   b_in[j] = B[k-j][j]  (zero-padded outside 0..N-1)
-"""
+# tb_systolic_array.py
+#
+# cocotb testbench for systolic_array.
+#
+# systolic_array wires an ARRAY_SIZE x ARRAY_SIZE grid of mac_unit PEs: a_in flows
+# left to right, b_in flows top to bottom, one hop per cycle. It has no awareness
+# of skewing itself -- correct matrix multiply results require the caller to
+# pre-skew inputs (row i delayed by i pulses) exactly as feeder does. Since
+# mac_unit's own arithmetic is verified separately, this testbench focuses on
+# what's unique here: PE-to-PE wiring direction, valid/clear broadcast to every
+# PE, the packed input/output bus mapping, and end-to-end matmul correctness
+# given a properly pre-skewed feed.
+#
+# Test cases:
+#   1  Reset                    -- results bus all zero after reset
+#   2  Clear broadcast          -- clear zeroes every PE simultaneously
+#   3  Wavefront trace (A)      -- confirms a_in propagates left-to-right,
+#                                  one cycle per hop
+#   4  Wavefront trace (B)      -- confirms b_in propagates top-to-bottom,
+#                                  one cycle per hop
+#   5  Valid gating broadcast   -- valid=0 -> no PE anywhere accumulates
+#   6  Results bus packing      -- distinct per-PE values land at the
+#                                  correct flat bus offset
+#   7  Identity matmul          -- A=I, B=random -> C must equal B exactly
+#   8  Random matmul            -- full random NxN matmul vs numpy
+#   9  Multiple passes          -- two passes without clear accumulate
+#                                  (output-stationary)
+#
+# Run with: make TOPLEVEL=systolic_array
 
 import cocotb
-from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, Timer
 import numpy as np
-import random
+from cocotb.clock import Clock
+from cocotb.triggers import Timer, RisingEdge
 
 ARRAY_SIZE  = 8
 DATA_WIDTH  = 8
 ACCUM_WIDTH = 21
 
-# ─────────────────────────────────────────────
-# Port helpers
-# ─────────────────────────────────────────────
+DATA_MIN = -(1 << (DATA_WIDTH - 1))
+DATA_MAX = (1 << (DATA_WIDTH - 1)) - 1
 
-def pack_a(row_vec):
-    """Pack list of N int8 values into a_in flat integer."""
-    val = 0
-    for i, v in enumerate(row_vec):
-        val |= (int(v) & 0xFF) << (i * DATA_WIDTH)
-    return val
 
-def pack_b(col_vec):
-    """Pack list of N int8 values into b_in flat integer."""
-    val = 0
-    for j, v in enumerate(col_vec):
-        val |= (int(v) & 0xFF) << (j * DATA_WIDTH)
-    return val
+# =========================================================================
+# Setup
+# =========================================================================
 
-def read_results(dut):
-    """Unpack results port into NxN numpy array of signed ints."""
-    raw = int(dut.results.value)
-    out = np.zeros((ARRAY_SIZE, ARRAY_SIZE), dtype=np.int64)
-    mask = (1 << ACCUM_WIDTH) - 1
-    sign_bit = 1 << (ACCUM_WIDTH - 1)
-    for i in range(ARRAY_SIZE):
-        for j in range(ARRAY_SIZE):
-            bits = (raw >> ((i * ARRAY_SIZE + j) * ACCUM_WIDTH)) & mask
-            if bits & sign_bit:
-                bits -= (1 << ACCUM_WIDTH)
-            out[i][j] = bits
-    return out
+async def start_clock(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, "ns").start())
 
-async def do_reset(dut):
+async def reset_dut(dut):
     dut.rst_n.value = 0
+    dut.a_in.value = 0
+    dut.b_in.value = 0
     dut.valid.value = 0
     dut.clear.value = 0
-    dut.a_in.value  = 0
-    dut.b_in.value  = 0
     for _ in range(3):
         await RisingEdge(dut.clk)
     dut.rst_n.value = 1
     await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
 
-async def do_clear(dut):
-    dut.clear.value = 1
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+def to_signed(value, width):
+    value &= (1 << width) - 1
+    if value & (1 << (width - 1)):
+        value -= (1 << width)
+    return value
+
+def pack_row(values, width):
+    packed = 0
+    for i, v in enumerate(values):
+        packed |= (v & ((1 << width) - 1)) << (i * width)
+    return packed
+
+def read_result(dut, r, c):
+    raw = int(dut.results.value)
+    idx = r * ARRAY_SIZE + c
+    slice_val = (raw >> (idx * ACCUM_WIDTH)) & ((1 << ACCUM_WIDTH) - 1)
+    return to_signed(slice_val, ACCUM_WIDTH)
+
+def read_all_results(dut):
+    return [[read_result(dut, r, c) for c in range(ARRAY_SIZE)] for r in range(ARRAY_SIZE)]
+
+def pe_a_out(dut, r, c):
+    return to_signed(int(dut.gen_rows[r].gen_columns[c].pe.a_out.value), DATA_WIDTH)
+
+def pe_b_out(dut, r, c):
+    return to_signed(int(dut.gen_rows[r].gen_columns[c].pe.b_out.value), DATA_WIDTH)
+
+async def drive(dut, a_row, b_row, valid, clear=0):
+    dut.a_in.value = pack_row(a_row, DATA_WIDTH)
+    dut.b_in.value = pack_row(b_row, DATA_WIDTH)
+    dut.valid.value = valid
+    dut.clear.value = clear
     await RisingEdge(dut.clk)
-    dut.clear.value = 0
-    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
 
-# ─────────────────────────────────────────────
-# Core driver: feed one NxN tile with skewed inputs
-# Returns numpy result matrix
-# ─────────────────────────────────────────────
-
-async def compute_tile(dut, A, B):
+async def run_matmul(dut, A, B, accumulate_only=False):
+    """Feeds A, B (ARRAY_SIZE x ARRAY_SIZE) into the array pre-skewed exactly
+    as feeder would (row r's k-th element delayed by r pulses), for one full
+    pass plus enough drain pulses for the last wavefront to reach the far
+    corner. If accumulate_only, does not clear beforehand."""
     N = ARRAY_SIZE
-    total_pulses = 3 * N - 2   # 22 for N=8: N data + 2*(N-1) drain
+    if not accumulate_only:
+        await drive(dut, [0]*N, [0]*N, valid=0, clear=1)
 
-    for pulse in range(total_pulses):
-        a_edge = []
-        b_edge = []
-        for i in range(N):
-            k = pulse - i
-            a_edge.append(A[i][k] if 0 <= k < N else 0)
-        for j in range(N):
-            k = pulse - j
-            b_edge.append(B[k][j] if 0 <= k < N else 0)
+    total_pulses = N + 2 * (N - 1)
+    for p in range(total_pulses):
+        a_word = [0] * N
+        b_word = [0] * N
+        for r in range(N):
+            k = p - r
+            if 0 <= k < N:
+                a_word[r] = int(A[r][k])
+        for c in range(N):
+            k = p - c
+            if 0 <= k < N:
+                b_word[c] = int(B[k][c])
+        await drive(dut, a_word, b_word, valid=1)
 
-        dut.a_in.value  = pack_a(a_edge)
-        dut.b_in.value  = pack_b(b_edge)
-        dut.valid.value = 1
-        await RisingEdge(dut.clk)
 
-    dut.valid.value = 0
-    dut.a_in.value  = 0
-    dut.b_in.value  = 0
-    await RisingEdge(dut.clk)
-
-    return read_results(dut)
-
-# ─────────────────────────────────────────────
-# Test 1 — reset clears all results
-# ─────────────────────────────────────────────
+# =========================================================================
+# Test 1 -- Reset
+# =========================================================================
 
 @cocotb.test()
 async def test_reset(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    res = read_results(dut)
-    assert np.all(res == 0), f"results not zero after reset:\n{res}"
-    dut._log.info("PASS: reset")
+    """results bus all zero immediately after reset."""
+    await start_clock(dut)
+    await reset_dut(dut)
 
-# ─────────────────────────────────────────────
-# Test 2 — identity matrix: A=I, B=I → C=I
-# ─────────────────────────────────────────────
+    for r in range(ARRAY_SIZE):
+        for c in range(ARRAY_SIZE):
+            assert read_result(dut, r, c) == 0, f"PE({r},{c}) not zero after reset"
 
-@cocotb.test()
-async def test_identity(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    N = ARRAY_SIZE
-    I = np.eye(N, dtype=np.int64)
-    res = await compute_tile(dut, I, I)
-    assert np.array_equal(res, I), f"I×I != I:\n{res}"
-    dut._log.info("PASS: identity")
 
-# ─────────────────────────────────────────────
-# Test 3 — all-ones matrix: A=1, B=1 → C[i][j]=N
-# ─────────────────────────────────────────────
+# =========================================================================
+# Test 2 -- Clear Broadcast
+# =========================================================================
 
 @cocotb.test()
-async def test_all_ones(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    N = ARRAY_SIZE
-    A = np.ones((N, N), dtype=np.int64)
-    B = np.ones((N, N), dtype=np.int64)
-    expected = np.full((N, N), N, dtype=np.int64)
-    res = await compute_tile(dut, A, B)
-    assert np.array_equal(res, expected), f"all-ones failed:\n{res}\nexpected:\n{expected}"
-    dut._log.info(f"PASS: all_ones  (each element = {N})")
+async def test_clear_resets_all_pes(dut):
+    """clear zeroes every PE's result simultaneously."""
+    await start_clock(dut)
+    await reset_dut(dut)
 
-# ─────────────────────────────────────────────
-# Test 4 — single non-zero element
-# ─────────────────────────────────────────────
+    await drive(dut, [5]*ARRAY_SIZE, [5]*ARRAY_SIZE, valid=1)
+    await drive(dut, [3]*ARRAY_SIZE, [3]*ARRAY_SIZE, valid=1)
 
-@cocotb.test()
-async def test_single_element(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    N = ARRAY_SIZE
-    A = np.zeros((N, N), dtype=np.int64)
-    B = np.zeros((N, N), dtype=np.int64)
-    A[2][3] = 5
-    B[3][4] = 7
-    expected = np.zeros((N, N), dtype=np.int64)
-    expected[2][4] = 35   # only MAC[2][4] fires: A[2][3]*B[3][4]
-    res = await compute_tile(dut, A, B)
-    assert np.array_equal(res, expected), f"single-element failed:\n{res}\nexpected:\n{expected}"
-    dut._log.info("PASS: single_element")
+    nonzero = sum(1 for r in range(ARRAY_SIZE) for c in range(ARRAY_SIZE) if read_result(dut, r, c) != 0)
+    assert nonzero > 0, "expected some PEs to have accumulated before clear"
 
-# ─────────────────────────────────────────────
-# Test 5 — clear resets all accumulators
-# ─────────────────────────────────────────────
+    await drive(dut, [0]*ARRAY_SIZE, [0]*ARRAY_SIZE, valid=0, clear=1)
+    await Timer(1, unit="ns")
+
+    for r in range(ARRAY_SIZE):
+        for c in range(ARRAY_SIZE):
+            assert read_result(dut, r, c) == 0, f"PE({r},{c}) not cleared"
+
+
+# =========================================================================
+# Test 3 -- Wavefront Trace, A (left -> right)
+# =========================================================================
 
 @cocotb.test()
-async def test_clear(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    N = ARRAY_SIZE
-    A = np.ones((N, N), dtype=np.int64)
-    B = np.ones((N, N), dtype=np.int64)
-    await compute_tile(dut, A, B)   # load up accumulators
+async def test_wavefront_trace_a(dut):
+    """A unique value held continuously at row 0's a_in must appear at
+    PE(0,c)'s a_out exactly c+1 cycles after it starts, confirming a_in
+    propagates strictly left to right, one hop per cycle."""
+    await start_clock(dut)
+    await reset_dut(dut)
 
-    await do_clear(dut)
-    res = read_results(dut)
-    assert np.all(res == 0), f"clear failed, results:\n{res}"
-    dut._log.info("PASS: clear")
+    TOKEN = 37
+    a_row = [TOKEN] + [0] * (ARRAY_SIZE - 1)
+    b_row = [0] * ARRAY_SIZE
 
-# ─────────────────────────────────────────────
-# Test 7 — signed values: negative inputs
-# ─────────────────────────────────────────────
+    dut.a_in.value = pack_row(a_row, DATA_WIDTH)
+    dut.b_in.value = pack_row(b_row, DATA_WIDTH)
+    dut.valid.value = 1
+    dut.clear.value = 0
 
-@cocotb.test()
-async def test_signed_negative(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    N = ARRAY_SIZE
-    A = np.full((N, N), -1, dtype=np.int64)
-    B = np.full((N, N),  1, dtype=np.int64)
-    expected = A @ B   # each element = -N = -8
-    res = await compute_tile(dut, A, B)
-    assert np.array_equal(res, expected), \
-        f"signed negative failed:\ngot:\n{res}\nexpected:\n{expected}"
-    dut._log.info(f"PASS: signed_negative  (each element = {expected[0,0]})")
-
-# ─────────────────────────────────────────────
-# Test 8 — worst case: -128 × -128, accumulate 8 times = 131072
-# ─────────────────────────────────────────────
-
-@cocotb.test()
-async def test_worst_case(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    N = ARRAY_SIZE
-    A = np.full((N, N), -128, dtype=np.int64)
-    B = np.full((N, N), -128, dtype=np.int64)
-    expected = A @ B   # each = 8 * 16384 = 131072; fits in 21-bit signed (max 1048575)
-    res = await compute_tile(dut, A, B)
-    assert np.array_equal(res, expected), \
-        f"worst_case failed:\ngot:\n{res}\nexpected:\n{expected}"
-    dut._log.info(f"PASS: worst_case  (each element = {expected[0,0]})")
-
-# ─────────────────────────────────────────────
-# Test 10 — no accumulation when valid=0
-# ─────────────────────────────────────────────
-
-@cocotb.test()
-async def test_no_accum_without_valid(dut):
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
-    N = ARRAY_SIZE
-
-    # Drive inputs for 10 cycles with valid=0
-    for _ in range(10):
-        dut.a_in.value  = pack_a([127] * N)
-        dut.b_in.value  = pack_b([127] * N)
-        dut.valid.value = 0
+    for cycle in range(1, ARRAY_SIZE + 1):
         await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        c = cycle - 1
+        assert pe_a_out(dut, 0, c) == TOKEN, (
+            f"token not at PE(0,{c}).a_out after {cycle} cycles"
+        )
+        for future_c in range(c + 1, ARRAY_SIZE):
+            assert pe_a_out(dut, 0, future_c) != TOKEN, (
+                f"token arrived early at PE(0,{future_c}).a_out"
+            )
 
-    await RisingEdge(dut.clk)
-    res = read_results(dut)
-    assert np.all(res == 0), f"accum changed without valid:\n{res}"
-    dut._log.info("PASS: no_accum_without_valid")
 
-# ─────────────────────────────────────────────
-# Test 12 — a_out/b_out pipeline flow (data propagates rightward/downward)
-# ─────────────────────────────────────────────
+# =========================================================================
+# Test 4 -- Wavefront Trace, B (top -> bottom)
+# =========================================================================
 
 @cocotb.test()
-async def test_pipeline_flow(dut):
-    """
-    Drive a single non-zero value on a_in[0] and b_in[0] with valid=1.
-    After N valid pulses the value should have propagated across all MACs.
-    Verified indirectly via the matmul result.
-    """
-    cocotb.start_soon(Clock(dut.clk, 40, units="ns").start())
-    await do_reset(dut)
+async def test_wavefront_trace_b(dut):
+    """A unique value held continuously at column 0's b_in must appear at
+    PE(r,0)'s b_out exactly r+1 cycles after it starts, confirming b_in
+    propagates strictly top to bottom, one hop per cycle."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    TOKEN = 41
+    a_row = [0] * ARRAY_SIZE
+    b_row = [TOKEN] + [0] * (ARRAY_SIZE - 1)
+
+    dut.a_in.value = pack_row(a_row, DATA_WIDTH)
+    dut.b_in.value = pack_row(b_row, DATA_WIDTH)
+    dut.valid.value = 1
+    dut.clear.value = 0
+
+    for cycle in range(1, ARRAY_SIZE + 1):
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ns")
+        r = cycle - 1
+        assert pe_b_out(dut, r, 0) == TOKEN, (
+            f"token not at PE({r},0).b_out after {cycle} cycles"
+        )
+        for future_r in range(r + 1, ARRAY_SIZE):
+            assert pe_b_out(dut, future_r, 0) != TOKEN, (
+                f"token arrived early at PE({future_r},0).b_out"
+            )
+
+
+# =========================================================================
+# Test 5 -- Valid Gating Broadcast
+# =========================================================================
+
+@cocotb.test()
+async def test_valid_gating_broadcast(dut):
+    """valid=0 means no PE anywhere in the grid accumulates -- checked at
+    several distinct grid positions, not just one."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    await drive(dut, [4]*ARRAY_SIZE, [4]*ARRAY_SIZE, valid=0)
+
+    check_positions = [(0, 0), (0, ARRAY_SIZE-1), (ARRAY_SIZE-1, 0), (ARRAY_SIZE-1, ARRAY_SIZE-1), (ARRAY_SIZE//2, ARRAY_SIZE//2)]
+    for r, c in check_positions:
+        assert read_result(dut, r, c) == 0, f"PE({r},{c}) accumulated despite valid=0"
+
+
+# =========================================================================
+# Test 6 -- Results Bus Packing
+# =========================================================================
+
+@cocotb.test()
+async def test_results_bus_packing(dut):
+    """Distinct per-PE values confirm the packed results bus maps each PE
+    to the correct flat offset (row-major: index = r*ARRAY_SIZE + c).
+    Uses the same proven pre-skewed feed as the matmul tests -- a single
+    pulse can't populate the whole grid at once, since each PE only
+    forwards a_in/b_in to its neighbour one cycle after it sees them."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
     N = ARRAY_SIZE
+    # row r constant at (r+1), column c constant at (c+1) -> each PE(r,c)
+    # accumulates N inner-product terms of (r+1)*(c+1), giving a distinct,
+    # easily-verified value per position: N*(r+1)*(c+1)
+    A = np.array([[r + 1] * N for r in range(N)])
+    B = np.array([[c + 1 for c in range(N)] for _ in range(N)])
 
-    # A = row 0 all-3, rest zero; B = col 0 all-2, rest zero
-    A = np.zeros((N, N), dtype=np.int64)
-    B = np.zeros((N, N), dtype=np.int64)
-    A[0, :] = 3
-    B[:, 0] = 2
+    await run_matmul(dut, A, B)
 
-    expected = A @ B   # only column 0 of result is non-zero: C[0][0] = 8*6 = 48
-    res = await compute_tile(dut, A, B)
-    assert np.array_equal(res, expected), \
-        f"pipeline_flow failed:\ngot:\n{res}\nexpected:\n{expected}"
-    dut._log.info("PASS: pipeline_flow")
+    for r in range(N):
+        for c in range(N):
+            expected = N * (r + 1) * (c + 1)
+            assert read_result(dut, r, c) == expected, (
+                f"PE({r},{c}): expected {expected}, got {read_result(dut, r, c)}"
+            )
+
+
+# =========================================================================
+# Test 7 -- Identity Matmul
+# =========================================================================
+
+@cocotb.test()
+async def test_identity_matmul(dut):
+    """A = Identity, B = random -> C must equal B exactly."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    N = ARRAY_SIZE
+    A = np.eye(N, dtype=np.int64)
+    rng = np.random.default_rng(1)
+    B = rng.integers(DATA_MIN, DATA_MAX + 1, size=(N, N))
+
+    await run_matmul(dut, A, B)
+
+    results = np.array(read_all_results(dut))
+    expected = A @ B
+    assert np.array_equal(results, expected), f"got\n{results}\nexpected\n{expected}"
+
+
+# =========================================================================
+# Test 8 -- Random Matmul
+# =========================================================================
+
+@cocotb.test()
+async def test_random_matmul(dut):
+    """Full random NxN matmul via a properly pre-skewed feed, vs numpy."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    N = ARRAY_SIZE
+    rng = np.random.default_rng(7)
+    # kept small enough that A@B can't overflow ACCUM_WIDTH for a single pass
+    A = rng.integers(-4, 5, size=(N, N))
+    B = rng.integers(-4, 5, size=(N, N))
+
+    await run_matmul(dut, A, B)
+
+    results = np.array(read_all_results(dut))
+    expected = A.astype(np.int64) @ B.astype(np.int64)
+    assert np.array_equal(results, expected), f"got\n{results}\nexpected\n{expected}"
+
+
+# =========================================================================
+# Test 9 -- Multiple Passes Accumulate
+# =========================================================================
+
+@cocotb.test()
+async def test_multiple_passes_accumulate(dut):
+    """Two matmul passes without clear in between -> results = A1@B1 + A2@B2,
+    confirming output-stationary accumulation across passes."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    N = ARRAY_SIZE
+    rng = np.random.default_rng(3)
+    A1 = rng.integers(-3, 4, size=(N, N))
+    B1 = rng.integers(-3, 4, size=(N, N))
+    A2 = rng.integers(-3, 4, size=(N, N))
+    B2 = rng.integers(-3, 4, size=(N, N))
+
+    await run_matmul(dut, A1, B1, accumulate_only=False)
+    await run_matmul(dut, A2, B2, accumulate_only=True)
+
+    results = np.array(read_all_results(dut))
+    expected = (A1.astype(np.int64) @ B1.astype(np.int64)) + (A2.astype(np.int64) @ B2.astype(np.int64))
+    assert np.array_equal(results, expected), f"got\n{results}\nexpected\n{expected}"

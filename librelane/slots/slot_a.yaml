@@ -1,49 +1,70 @@
-# Slot A -- standalone development/test slot for Team Maxilerator's systolic
-# array accelerator.
+# Slot A -- standalone development/test configuration for Team Maxilerator's
+# systolic-array accelerator.
 #
-# This is a SELF-CONTAINED representation of Slot A for our own synthesis/
-# PnR/timing iteration -- not the final multi-team Chipathon padframe. Per
-# the padframe proposal, Slot A occupies one of 4 possible CORNERS of the
-# shared die, at 1/4 the workshop slot's own core area (each core side
-# halved: 2051/2 = 1025.5, rounded down to 1020 for inner-edge margin).
-# A corner block has only 2 outer edges bordering the true die boundary --
-# the other 2 face inward toward neighboring blocks (A/B/C/D/E) and carry no
-# pads at all in the real integrated chip. This slot models that: SOUTH and
-# WEST carry all pads (representing the true die boundary for a bottom-left
-# corner placement); NORTH and EAST are empty (core touches the die edge
-# directly, representing the inward-facing sides). The 442 um border on
-# SOUTH/WEST matches the workshop slot's own border width, since pad cell
-# footprint doesn't shrink with die size.
+# This file provides a SELF-CONTAINED representation of Slot A for RTL-to-GDS
+# development, synthesis, place-and-route, timing analysis, and dry-run
+# physical implementation. It is not intended to define the final integrated
+# multi-team Chipathon padframe.
 #
-# Pad count is exactly 22 (clk_pad/rst_n_pad included in that count, per
-# team decision to treat the full pin budget as inclusive of them), capped
-# at 11 pads per side (SOUTH/WEST) to match the slot's square/symmetrical
-# shape. Power is a single DVDD/DVSS pair (both placed on WEST), a
-# deliberately conservative choice pending real current-draw data from
-# synthesis.
+# The Slot A interface and pad allocation used here were developed based on
+# the available Chipathon/padframe guidelines. The design currently uses a
+# total of 22 pad positions, including clk_pad and rst_n_pad:
 #
-# Which corner Slot A actually ends up in, and the exact pad indices on the
-# shared padring, are decided at final integration across all teams and
-# are not yet known -- updating DIE_AREA/CORE_AREA/PAD_* to match the real
-# integrated position is a mechanical change once that's decided.
+#     12 bidirectional pads (gf180mcu_fd_io__bi_24t)
+#         - data[7:0]
+#         - a_ready_o
+#         - b_ready_o
+#         - out_valid_o
+#         - out_last_o
 #
-# Die:  1462 x 1462 um (1020 core + 442 border, on the 2 outer sides only).
-# Pads: 12 bidir  (gf180mcu_fd_io__bi_24t) -- data[7:0] + a_ready_o/b_ready_o/
-#                                              out_valid_o/out_last_o
-#     +  5 input  (gf180mcu_fd_io__in_c)   -- a_valid_i/a_last_i/b_valid_i/
-#                                              b_last_i/out_ready_i
-#     +  1 analog (gf180mcu_fd_io__asig_5p0) -- unused, zero-width-vector
-#                                                 workaround only
-#     +  1 dvdd + 1 dvss
-#     +  2 hardcoded input cells (clk_pad, rst_n_pad)
+#      5 input pads (gf180mcu_fd_io__in_c)
+#         - a_valid_i
+#         - a_last_i
+#         - b_valid_i
+#         - b_last_i
+#         - out_ready_i
 #
-# Index mapping (generate loops in chip_top.sv) -- see chip_core.sv's pin
-# map comment for what each input[i]/bidir[i] connects to.
+#      1 analog pad (gf180mcu_fd_io__asig_5p0)
+#         - currently unused; retained as an analog placeholder
+#
+#      1 DVDD pad
+#      1 DVSS pad
+#      2 dedicated input pads
+#         - clk_pad
+#         - rst_n_pad
+#
+# For the standalone development model, the functional pads are currently
+# placed on the SOUTH and WEST sides. NORTH and EAST are populated only as
+# required to complete the standalone padring. The final pad locations and
+# pad indices within the shared Chipathon padframe are subject to the final
+# integration definition.
+#
+# IMPORTANT -- TEMPORARY FLOORPLAN:
+#
+# The official DIE_AREA and CORE_AREA for Slot A have not yet been finalized/
+# confirmed by the Chipathon integration team. Until those dimensions are
+# provided, this configuration intentionally reuses the default dimensions
+# from slot_workshop.yaml:
+#
+#     DIE_AREA:  [0, 0, 2935, 2935]
+#     CORE_AREA: [442, 442, 2493, 2493]
+#
+# These dimensions are therefore DEVELOPMENT/DRY-RUN values only and must not
+# be interpreted as the final physical dimensions allocated to Slot A.
+#
+# The above temporary floorplan has been used successfully for a complete
+# LibreLane RTL-to-GDS dry run of the accelerator. Once the official Slot A
+# geometry and shared-padframe placement are confirmed, DIE_AREA, CORE_AREA,
+# and any integration-dependent pad-placement constraints will be updated
+# accordingly.
+#
+# Index mapping for the generated input[i] and bidir[i] connections is defined
+# in chip_top.sv / chip_core.sv.
 
 # Floorplanning
 FP_SIZING: absolute
-DIE_AREA:  [0, 0, 1462, 1462]
-CORE_AREA: [442, 442, 1462, 1462]
+DIE_AREA:  [0, 0, 2935, 2935]
+CORE_AREA: [442, 442, 2493, 2493]
 
 VERILOG_DEFINES: ["SLOT_A"]
 

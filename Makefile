@@ -8,7 +8,7 @@ PDK ?= gf180mcuD
 PDK_TAG ?= 1.8.0
 
 AVAILABLE_SLOTS = 1x1 0p5x1 1x0p5 0p5x0p5 workshop a
-DEFAULT_SLOT = 1x1
+DEFAULT_SLOT = a
 
 # Slot can be any of AVAILABLE_SLOTS
 SLOT ?= $(DEFAULT_SLOT)
@@ -66,13 +66,17 @@ librelane-padring: ## Only create the padring
 	PDK_ROOT=${PDK_ROOT} PDK=${PDK} python3 scripts/padring.py librelane/slots/slot_${SLOT}.yaml librelane/config.yaml
 .PHONY: librelane-padring
 
-sim: ## Run RTL simulation with cocotb
-	cd cocotb; PDK_ROOT=${PDK_ROOT} PDK=${PDK} SLOT=${SLOT} python3 chip_top_tb.py
+sim: ## Run RTL simulation with cocotb (chip_top)
+	cd cocotb && PDK_ROOT=${PDK_ROOT} PDK=${PDK} SLOT=${SLOT} $(MAKE) TOPLEVEL=chip_top
 .PHONY: sim
 
-sim-gl: ## Run gate-level simulation with cocotb (after copy-final)
-	cd cocotb; GL=1 PDK_ROOT=${PDK_ROOT} PDK=${PDK} SLOT=${SLOT} python3 chip_top_tb.py
+sim-gl: ## Run gate-level simulation with cocotb (after librelane; chip_top)
+	cd cocotb && GL=1 PDK_ROOT=${PDK_ROOT} PDK=${PDK} SLOT=${SLOT} $(MAKE) TOPLEVEL=chip_top
 .PHONY: sim-gl
+
+sim-all: ## Run every module's RTL testbench (mac_unit, systolic_array, feeder, output_processor, accelerator_core, chip_top)
+	cd cocotb && PDK_ROOT=${PDK_ROOT} PDK=${PDK} SLOT=${SLOT} $(MAKE) run-all
+.PHONY: sim-all
 
 sim-view: ## View simulation waveforms in GTKWave
 	gtkwave cocotb/sim_build/chip_top.fst

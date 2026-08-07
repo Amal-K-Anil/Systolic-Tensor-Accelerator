@@ -8,6 +8,15 @@
 # Modules:
 #   mac_unit  systolic_array  feeder  output_processor
 #   accelerator_core  chip_top
+#
+# chip_top-specific variables, each independently defaulted so this
+# Makefile runs standalone; a parent Makefile may override any of them
+# by exporting the same-named variable before invoking:
+#   SLOT      ?= a        -- selects -DSLOT_<SLOT, uppercased>
+#   PDK_ROOT  ?= <repo>/gf180mcu
+#   PDK       ?= gf180mcuD
+#   GL        ?= (unset)  -- set to 1 for gate-level sim against the
+#                             post-synthesis netlist instead of RTL
 
 # ========================
 # Simulator Configuration
@@ -28,14 +37,25 @@ CORE_DIR    := $(PROJECT_ROOT)/src/core
 WRAPPER_DIR := $(PROJECT_ROOT)/src/chipathon_wrapper
 AXI_DIR     := $(PROJECT_ROOT)/src/axi_wrapper
 IP_DIR      := $(PROJECT_ROOT)/ip
+FINAL_DIR   := $(PROJECT_ROOT)/final
 
-GF180_PDK_ROOT := $(PROJECT_ROOT)/gf180mcu/gf180mcuD
+SLOT     ?= a
+PDK_ROOT ?= $(PROJECT_ROOT)/gf180mcu
+PDK      ?= gf180mcuD
+SCL      := gf180mcu_fd_sc_mcu7t5v0
+
+GF180_PDK_ROOT := $(PDK_ROOT)/$(PDK)
 GF180_IO_DIR   := $(GF180_PDK_ROOT)/libs.ref/gf180mcu_fd_io/verilog
+GF180_SCL_DIR  := $(GF180_PDK_ROOT)/libs.ref/$(SCL)/verilog
 
-GF180_IO_MODEL    := $(GF180_IO_DIR)/gf180mcu_fd_io.v
-GF180_WS_IO_MODEL := $(GF180_IO_DIR)/gf180mcu_ws_io__blackbox.v
-GF180_CHIP_ID_MODEL := $(IP_DIR)/gf180mcu_ws_ip__id/vh/gf180mcu_ws_ip__id.v
+GF180_IO_MODEL       := $(GF180_IO_DIR)/gf180mcu_fd_io.v
+GF180_WS_IO_MODEL    := $(GF180_IO_DIR)/gf180mcu_ws_io__blackbox.v
+GF180_CHIP_ID_MODEL  := $(IP_DIR)/gf180mcu_ws_ip__id/vh/gf180mcu_ws_ip__id.v
 GF180_LOGO_MODEL     := $(IP_DIR)/gf180mcu_ws_ip__logo/vh/gf180mcu_ws_ip__logo.v
+
+GF180_SCL_MODEL        := $(GF180_SCL_DIR)/$(SCL).v
+GF180_PRIMITIVES_MODEL := $(GF180_SCL_DIR)/primitives.v
+CHIP_TOP_NETLIST        := $(FINAL_DIR)/pnl/chip_top.pnl.v
 
 # Allows chip_top.sv to resolve `include "slot_defines.svh"
 COMPILE_ARGS += -I$(WRAPPER_DIR)
@@ -101,7 +121,7 @@ else ifeq ($(TOPLEVEL),accelerator_core)
 else ifeq ($(TOPLEVEL),chip_top)
 
 	COCOTB_TEST_MODULES = chip_top_tb
-	COMPILE_ARGS += -DSLOT_A
+	COMPILE_ARGS += -DSLOT_$(shell echo $(SLOT) | tr a-z A-Z)
 	COMPILE_ARGS += -I$(GF180_IO_DIR)
 
 	VERILOG_SOURCES += $(GF180_IO_MODEL)
@@ -109,11 +129,21 @@ else ifeq ($(TOPLEVEL),chip_top)
 	VERILOG_SOURCES += $(GF180_CHIP_ID_MODEL)
 	VERILOG_SOURCES += $(GF180_LOGO_MODEL)
 
-	# chip_top -> chip_core -> host_interface -> accelerator_core
-	VERILOG_SOURCES += $(ACCELERATOR_SOURCES)
-	VERILOG_SOURCES += $(WRAPPER_DIR)/host_interface.sv
-	VERILOG_SOURCES += $(WRAPPER_DIR)/chip_core.sv
-	VERILOG_SOURCES += $(WRAPPER_DIR)/chip_top.sv
+	ifeq ($(GL),1)
+		# Gate-level: the post-synthesis netlist, plus the cell
+		# library's own behavioral models and the primitives they
+		# depend on. Requires `make librelane` to have already
+		# produced final/pnl/chip_top.pnl.v.
+		VERILOG_SOURCES += $(GF180_SCL_MODEL)
+		VERILOG_SOURCES += $(GF180_PRIMITIVES_MODEL)
+		VERILOG_SOURCES += $(CHIP_TOP_NETLIST)
+	else
+		# RTL: chip_top -> chip_core -> host_interface -> accelerator_core
+		VERILOG_SOURCES += $(ACCELERATOR_SOURCES)
+		VERILOG_SOURCES += $(WRAPPER_DIR)/host_interface.sv
+		VERILOG_SOURCES += $(WRAPPER_DIR)/chip_core.sv
+		VERILOG_SOURCES += $(WRAPPER_DIR)/chip_top.sv
+	endif
 
 else ifeq ($(TOPLEVEL),accelerator_axi_wrapper)
 
@@ -149,7 +179,7 @@ run-all: ## Run every module's testbench, in order
 		echo " Running: $$m"; \
 		echo "========================================"; \
 		$(MAKE) clean; \
-		$(MAKE) TOPLEVEL=$$m sim || exit 1; \
+		$(MAKE) TOPLEVEL=$$m || exit 1; \
 	done
 
 clean:: ## Remove all simulation build artifacts

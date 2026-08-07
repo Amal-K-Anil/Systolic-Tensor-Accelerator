@@ -45,8 +45,8 @@
 # confirmed by the Chipathon integration team. Until those dimensions are
 # provided, this configuration intentionally uses the following dimensions:
 #
-#     DIE_AREA:  [0, 0, 2284, 2284]
-#     CORE_AREA: [442, 442, 1842, 1842]
+#     DIE_AREA:  [0, 0, 2084, 2084]
+#     CORE_AREA: [442, 442, 1642, 1642]
 #
 # These dimensions are therefore DEVELOPMENT/DRY-RUN values only and must not
 # be interpreted as the final physical dimensions allocated to Slot A.
@@ -62,8 +62,8 @@
 
 # Floorplanning
 FP_SIZING: absolute
-DIE_AREA:  [0, 0, 2284, 2284]
-CORE_AREA: [442, 442, 1842, 1842]
+DIE_AREA:  [0, 0, 2084, 2084]
+CORE_AREA: [442, 442, 1642, 1642]
 
 VERILOG_DEFINES: ["SLOT_A"]
 
@@ -90,25 +90,25 @@ PAD_SOUTH: [
 # ----- East: SE -> NE (empty -- inward-facing side) -----
 PAD_EAST: []
 
-# ----- North: NE -> NW (empty -- inward-facing side) -----
+# ----- North: NW -> NE (empty -- inward-facing side) -----
 PAD_NORTH: []
 
-# ----- West: NW -> SW (11 pads) -----
+# ----- West: SW -> NW (11 pads) -----
 PAD_WEST: [
-    "dvdd_pads\\[0\\].pad",
-    "dvss_pads\\[0\\].pad",
+    "inputs\\[3\\].pad",
+    "inputs\\[2\\].pad",
+
+    "bidir\\[9\\].pad",
+    "bidir\\[8\\].pad",
+
+    "inputs\\[0\\].pad",
+    "inputs\\[1\\].pad",
+
+    clk_pad,
+    rst_n_pad,
 
     "analog\\[0\\].pad",
 
-    rst_n_pad,
-    clk_pad,
-
-    "inputs\\[1\\].pad",
-    "inputs\\[0\\].pad",
-
-    "bidir\\[8\\].pad",
-    "bidir\\[9\\].pad",
-
-    "inputs\\[2\\].pad",
-    "inputs\\[3\\].pad",
+    "dvss_pads\\[0\\].pad",
+    "dvdd_pads\\[0\\].pad",
 ]

@@ -12,5 +12,5 @@
 	"LVS_IGNORE": [],
 	"LVS_SPICE_FILES": [],
 	"LVS_VERILOG_FILES": [],
-	"LAYOUT_FILE": "chip_top.gds"
+	"LAYOUT_FILE": "chip_top_gds.zip/chip_top.gds"
 }

@@ -43,11 +43,10 @@
 #
 # The official DIE_AREA and CORE_AREA for Slot A have not yet been finalized/
 # confirmed by the Chipathon integration team. Until those dimensions are
-# provided, this configuration intentionally reuses the default dimensions
-# from slot_workshop.yaml:
+# provided, this configuration intentionally uses the following dimensions:
 #
-#     DIE_AREA:  [0, 0, 2935, 2935]
-#     CORE_AREA: [442, 442, 2493, 2493]
+#     DIE_AREA:  [0, 0, 2284, 2284]
+#     CORE_AREA: [442, 442, 1842, 1842]
 #
 # These dimensions are therefore DEVELOPMENT/DRY-RUN values only and must not
 # be interpreted as the final physical dimensions allocated to Slot A.
@@ -63,8 +62,8 @@
 
 # Floorplanning
 FP_SIZING: absolute
-DIE_AREA:  [0, 0, 2935, 2935]
-CORE_AREA: [442, 442, 2493, 2493]
+DIE_AREA:  [0, 0, 2284, 2284]
+CORE_AREA: [442, 442, 1842, 1842]
 
 VERILOG_DEFINES: ["SLOT_A"]
 

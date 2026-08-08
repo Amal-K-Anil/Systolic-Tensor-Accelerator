@@ -69,6 +69,7 @@
               ps: with ps; [
                 # Verification
                 cocotb
+                numpy
 
                 # For KLayout Python DRC runner
                 docopt

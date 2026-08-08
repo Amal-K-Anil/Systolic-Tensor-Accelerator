@@ -130,13 +130,15 @@ else ifeq ($(TOPLEVEL),chip_top)
 	VERILOG_SOURCES += $(GF180_LOGO_MODEL)
 
 	ifeq ($(GL),1)
-		# Gate-level: the post-synthesis netlist, plus the cell
-		# library's own behavioral models and the primitives they
-		# depend on. Requires `make librelane` to have already
-		# produced final/pnl/chip_top.pnl.v.
-		VERILOG_SOURCES += $(GF180_SCL_MODEL)
-		VERILOG_SOURCES += $(GF180_PRIMITIVES_MODEL)
-		VERILOG_SOURCES += $(CHIP_TOP_NETLIST)
+        # Powered LibreLane netlist explicitly connects
+        # VDD/VSS/VNW/VPW on GF180 standard cells.
+        COMPILE_ARGS += -DUSE_POWER_PINS
+        # Gate-level: the post-synthesis netlist, plus the cell
+        # library's own behavioral models and the primitives they
+        # depend on.
+        VERILOG_SOURCES += $(GF180_SCL_MODEL)
+        VERILOG_SOURCES += $(GF180_PRIMITIVES_MODEL)
+        VERILOG_SOURCES += $(CHIP_TOP_NETLIST)
 	else
 		# RTL: chip_top -> chip_core -> host_interface -> accelerator_core
 		VERILOG_SOURCES += $(ACCELERATOR_SOURCES)

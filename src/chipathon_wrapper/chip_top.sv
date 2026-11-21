@@ -6,11 +6,7 @@
 `include "slot_defines.svh"
 
 module chip_top #(
-    // Power/ground pads for core and I/O
-    parameter NUM_DVDD_PADS = `NUM_DVDD_PADS,
-    parameter NUM_DVSS_PADS = `NUM_DVSS_PADS,
-
-    // Signal pads
+    // Signal interfaces
     parameter NUM_INPUT_PADS = `NUM_INPUT_PADS,
     parameter NUM_BIDIR_PADS = `NUM_BIDIR_PADS,
     parameter NUM_ANALOG_PADS = `NUM_ANALOG_PADS
@@ -20,153 +16,66 @@ module chip_top #(
     inout  wire VSS,
     `endif
 
-    inout  wire clk_PAD,
-    inout  wire rst_n_PAD,
-    
-    inout  wire [NUM_INPUT_PADS-1:0] input_PAD,
-    inout  wire [NUM_BIDIR_PADS-1:0] bidir_PAD,
-    
-    inout  wire [NUM_ANALOG_PADS-1:0] analog_PAD
+    input  wire clk,
+    input  wire rst_n,
+
+    inout  wire [7:0] data,
+
+    input  wire a_valid_i,
+    output wire a_ready_o,
+    input  wire a_last_i,
+
+    input  wire b_valid_i,
+    output wire b_ready_o,
+    input  wire b_last_i,
+
+    output wire out_valid_o,
+    input  wire out_ready_i,
+    output wire out_last_o
 );
 
-    wire clk_PAD2CORE;
-    wire rst_n_PAD2CORE;
-    
-    wire [NUM_INPUT_PADS-1:0] input_PAD2CORE;
-    wire [NUM_INPUT_PADS-1:0] input_CORE2PAD_PU;
-    wire [NUM_INPUT_PADS-1:0] input_CORE2PAD_PD;
+    wire [NUM_INPUT_PADS-1:0] input_in;
+    wire [NUM_INPUT_PADS-1:0] input_pu;
+    wire [NUM_INPUT_PADS-1:0] input_pd;
 
-    wire [NUM_BIDIR_PADS-1:0] bidir_PAD2CORE;
-    wire [NUM_BIDIR_PADS-1:0] bidir_CORE2PAD;
-    wire [NUM_BIDIR_PADS-1:0] bidir_CORE2PAD_OE;
-    wire [NUM_BIDIR_PADS-1:0] bidir_CORE2PAD_CS;
-    wire [NUM_BIDIR_PADS-1:0] bidir_CORE2PAD_SL;
-    wire [NUM_BIDIR_PADS-1:0] bidir_CORE2PAD_IE;
-    wire [NUM_BIDIR_PADS-1:0] bidir_CORE2PAD_PU;
-    wire [NUM_BIDIR_PADS-1:0] bidir_CORE2PAD_PD;
+    wire [NUM_BIDIR_PADS-1:0] bidir_in;
+    wire [NUM_BIDIR_PADS-1:0] bidir_out;
+    wire [NUM_BIDIR_PADS-1:0] bidir_oe;
+    wire [NUM_BIDIR_PADS-1:0] bidir_cs;
+    wire [NUM_BIDIR_PADS-1:0] bidir_sl;
+    wire [NUM_BIDIR_PADS-1:0] bidir_ie;
+    wire [NUM_BIDIR_PADS-1:0] bidir_pu;
+    wire [NUM_BIDIR_PADS-1:0] bidir_pd;
 
-    // Power/ground pad instances
-    generate
-    for (genvar i=0; i<NUM_DVDD_PADS; i++) begin : dvdd_pads
-        (* keep *)
-        gf180mcu_ws_io__dvdd pad (
-            `ifdef USE_POWER_PINS
-            .DVDD   (VDD),
-            .DVSS   (VSS),
-            .VSS    (VSS)
-            `endif
-        );
-    end
-    
-    for (genvar i=0; i<NUM_DVSS_PADS; i++) begin : dvss_pads
-        (* keep *)
-        gf180mcu_ws_io__dvss pad (
-            `ifdef USE_POWER_PINS
-            .DVDD   (VDD),
-            .DVSS   (VSS),
-            .VDD    (VDD)
-            `endif
-        );
-    end
-    endgenerate
+    wire [NUM_ANALOG_PADS-1:0] analog;
 
-    // Signal IO pad instances
+    // Input-only signals -> existing chip_core mapping
+    assign input_in[0] = a_valid_i;
+    assign input_in[1] = a_last_i;
+    assign input_in[2] = b_valid_i;
+    assign input_in[3] = b_last_i;
+    assign input_in[4] = out_ready_i;
 
-    // Schmitt trigger
-    gf180mcu_fd_io__in_s clk_pad (
-        `ifdef USE_POWER_PINS
-        .DVDD   (VDD),
-        .DVSS   (VSS),
-        .VDD    (VDD),
-        .VSS    (VSS),
-        `endif
-    
-        .Y      (clk_PAD2CORE),
-        .PAD    (clk_PAD),
-        
-        .PU     (1'b0),
-        .PD     (1'b0)
-    );
-    
-    // Normal input
-    gf180mcu_fd_io__in_c rst_n_pad (
-        `ifdef USE_POWER_PINS
-        .DVDD   (VDD),
-        .DVSS   (VSS),
-        .VDD    (VDD),
-        .VSS    (VSS),
-        `endif
-    
-        .Y      (rst_n_PAD2CORE),
-        .PAD    (rst_n_PAD),
-        
-        .PU     (1'b0),
-        .PD     (1'b0)
-    );
+    // Shared 8-bit bidirectional data bus
+    assign bidir_in[7:0]  = data;
+    assign bidir_in[11:8] = '0;
 
     generate
-    for (genvar i=0; i<NUM_INPUT_PADS; i++) begin : inputs
-        (* keep *)
-        gf180mcu_fd_io__in_c pad (
-            `ifdef USE_POWER_PINS
-            .DVDD   (VDD),
-            .DVSS   (VSS),
-            .VDD    (VDD),
-            .VSS    (VSS),
-            `endif
-        
-            .Y      (input_PAD2CORE[i]),
-            .PAD    (input_PAD[i]),
-            
-            .PU     (input_CORE2PAD_PU[i]),
-            .PD     (input_CORE2PAD_PD[i])
-        );
-    end
+        for (genvar i = 0; i < 8; i++) begin : data_bus
+            assign data[i] = bidir_oe[i] ? bidir_out[i] : 1'bz;
+        end
     endgenerate
 
-    generate
-    for (genvar i=0; i<NUM_BIDIR_PADS; i++) begin : bidir
-        (* keep *)
-        gf180mcu_fd_io__bi_24t pad (
-            `ifdef USE_POWER_PINS
-            .DVDD   (VDD),
-            .DVSS   (VSS),
-            .VDD    (VDD),
-            .VSS    (VSS),
-            `endif
-        
-            .A      (bidir_CORE2PAD[i]),
-            .OE     (bidir_CORE2PAD_OE[i]),
-            .Y      (bidir_PAD2CORE[i]),
-            .PAD    (bidir_PAD[i]),
-            
-            .CS     (bidir_CORE2PAD_CS[i]),
-            .SL     (bidir_CORE2PAD_SL[i]),
-            .IE     (bidir_CORE2PAD_IE[i]),
+    // Fixed-direction output signals
+    assign a_ready_o   = bidir_out[8];
+    assign b_ready_o   = bidir_out[9];
+    assign out_valid_o = bidir_out[10];
+    assign out_last_o  = bidir_out[11];
 
-            .PU     (bidir_CORE2PAD_PU[i]),
-            .PD     (bidir_CORE2PAD_PD[i])
-        );
-    end
-    endgenerate
-
-    generate
-    for (genvar i=0; i<NUM_ANALOG_PADS; i++) begin : analog
-        (* keep *)
-        gf180mcu_fd_io__asig_5p0 pad (
-            `ifdef USE_POWER_PINS
-            .DVDD   (VDD),
-            .DVSS   (VSS),
-            .VDD    (VDD),
-            .VSS    (VSS),
-            `endif
-            .ASIG5V (analog_PAD[i])
-        );
-    end
-    endgenerate
+    // Purely digital design; retain the existing chip_core interface.
+    assign analog = '0;
 
     // Core design
-
     chip_core #(
         .NUM_INPUT_PADS  (NUM_INPUT_PADS),
         .NUM_BIDIR_PADS  (NUM_BIDIR_PADS),
@@ -176,30 +85,30 @@ module chip_top #(
         .VDD        (VDD),
         .VSS        (VSS),
         `endif
-    
-        .clk        (clk_PAD2CORE),
-        .rst_n      (rst_n_PAD2CORE),
-    
-        .input_in   (input_PAD2CORE),
-        .input_pu   (input_CORE2PAD_PU),
-        .input_pd   (input_CORE2PAD_PD),
 
-        .bidir_in   (bidir_PAD2CORE),
-        .bidir_out  (bidir_CORE2PAD),
-        .bidir_oe   (bidir_CORE2PAD_OE),
-        .bidir_cs   (bidir_CORE2PAD_CS),
-        .bidir_sl   (bidir_CORE2PAD_SL),
-        .bidir_ie   (bidir_CORE2PAD_IE),
-        .bidir_pu   (bidir_CORE2PAD_PU),
-        .bidir_pd   (bidir_CORE2PAD_PD),
-        
-        .analog     (analog_PAD)
+        .clk        (clk),
+        .rst_n      (rst_n),
+
+        .input_in   (input_in),
+        .input_pu   (input_pu),
+        .input_pd   (input_pd),
+
+        .bidir_in   (bidir_in),
+        .bidir_out  (bidir_out),
+        .bidir_oe   (bidir_oe),
+        .bidir_cs   (bidir_cs),
+        .bidir_sl   (bidir_sl),
+        .bidir_ie   (bidir_ie),
+        .bidir_pu   (bidir_pu),
+        .bidir_pd   (bidir_pd),
+
+        .analog     (analog)
     );
-    
+
     // Chip ID - do not remove, necessary for tapeout
     (* keep *)
     gf180mcu_ws_ip__id chip_id ();
-    
+
     // wafer.space logo - can be removed
     (* keep *)
     gf180mcu_ws_ip__logo wafer_space_logo ();

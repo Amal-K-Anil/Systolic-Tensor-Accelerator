@@ -41,23 +41,37 @@ if { [info exists ::env(MAX_CAPACITANCE_CONSTRAINT)] } {
 
 set clocks [get_clocks $clock_port]
 
-# Bidirectional pads
-set clk_core_inout_ports [get_ports { 
-    bidir_PAD[*]
-}] 
+# Shared bidirectional data bus
+set clk_core_inout_ports [get_ports {
+    data[*]
+}]
 
 set_input_delay -min 0 -clock $clocks $clk_core_inout_ports
 set_input_delay -max $input_delay_value -clock $clocks $clk_core_inout_ports
 set_output_delay $output_delay_value -clock $clocks $clk_core_inout_ports
 
-# Input-only pads
-set clk_core_input_ports [get_ports { 
-    rst_n_PAD
-    input_PAD[*]
-}] 
+# Input-only signals
+set clk_core_input_ports [get_ports {
+    rst_n
+    a_valid_i
+    a_last_i
+    b_valid_i
+    b_last_i
+    out_ready_i
+}]
 
 set_input_delay -min 0 -clock $clocks $clk_core_input_ports
 set_input_delay -max $input_delay_value -clock $clocks $clk_core_input_ports
+
+# Output-only signals
+set clk_core_output_ports [get_ports {
+    a_ready_o
+    b_ready_o
+    out_valid_o
+    out_last_o
+}]
+
+set_output_delay $output_delay_value -clock $clocks $clk_core_output_ports
 
 # Output load
 set cap_load [expr $::env(OUTPUT_CAP_LOAD) / 1000.0]

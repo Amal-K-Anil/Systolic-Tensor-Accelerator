@@ -11,9 +11,9 @@
 //   No controller module exists in this design. Each submodule self-generates its own
 //   phase transition and hands it directly to its neighbour:
 //
-//     feeder.drain_done   -> output_processor.output_en   (safe to start serializing)
-//     output_processor.output_done -> feeder.clear AND systolic_array.clear
-//                                      (last result transferred, reset for next run)
+//     feeder.drain_done            -> output_processor.output_en  (safe to start serializing)
+//     output_processor.output_done -> feeder.output_done          (prepare for next run)
+//     output_processor.clear       -> systolic_array.clear        (per-PE clear for next run)
 //
 //   Two independent AXI4-Stream input channels (activation, weight) stream into
 //   feeder, which skews and drives systolic_array; systolic_array's accumulator grid
@@ -55,15 +55,18 @@ module accelerator_core #(
 );
 
     // feeder <-> output_processor phase handoff
-    logic drain_done;  // feeder -> output_processor.output_en
-    logic clear;       // output_processor.output_done -> feeder + systolic_array
+    logic drain_done;   // feeder -> output_processor.output_en
+    logic output_done;  // output_processor -> feeder
 
     // feeder -> systolic_array
     logic [ARRAY_SIZE*DATA_WIDTH-1:0] a_out, b_out;
-    logic                             valid;
+    logic [ARRAY_SIZE*ARRAY_SIZE-1:0] valid;
 
     // systolic_array -> output_processor
     logic [ARRAY_SIZE*ARRAY_SIZE*ACCUM_WIDTH-1:0] results;
+
+    // output_processor -> systolic_array
+    logic [ARRAY_SIZE*ARRAY_SIZE-1:0] clear;
 
 
     // ===================================================================================
@@ -73,26 +76,26 @@ module accelerator_core #(
         .ARRAY_SIZE (ARRAY_SIZE),
         .DATA_WIDTH (DATA_WIDTH)
     ) u_feeder (
-        .clk        (clk),
-        .rst_n      (rst_n),
+        .clk         (clk),
+        .rst_n       (rst_n),
 
-        .a_data     (a_data),
-        .a_valid    (a_valid),
-        .a_ready    (a_ready),
-        .a_last     (a_last),
+        .a_data      (a_data),
+        .a_valid     (a_valid),
+        .a_ready     (a_ready),
+        .a_last      (a_last),
 
-        .b_data     (b_data),
-        .b_valid    (b_valid),
-        .b_ready    (b_ready),
-        .b_last     (b_last),
+        .b_data      (b_data),
+        .b_valid     (b_valid),
+        .b_ready     (b_ready),
+        .b_last      (b_last),
 
-        .clear      (clear),
+        .output_done (output_done),
 
-        .a_out      (a_out),
-        .b_out      (b_out),
-        .valid      (valid),
+        .a_out       (a_out),
+        .b_out       (b_out),
+        .valid       (valid),
 
-        .drain_done (drain_done)
+        .drain_done  (drain_done)
     );
 
 
@@ -127,18 +130,19 @@ module accelerator_core #(
         .SAT_MAX     (SAT_MAX),
         .SAT_MIN     (SAT_MIN)
     ) u_output_processor (
-        .clk          (clk),
-        .rst_n        (rst_n),
+        .clk         (clk),
+        .rst_n       (rst_n),
 
-        .results      (results),
+        .results     (results),
 
-        .output_en    (drain_done),
-        .output_done  (clear),
+        .output_en   (drain_done),
+        .output_done (output_done),
+        .clear       (clear),
 
-        .out_ready    (out_ready),
-        .out_data     (out_data),
-        .out_valid    (out_valid),
-        .out_last     (out_last)
+        .out_ready   (out_ready),
+        .out_data    (out_data),
+        .out_valid   (out_valid),
+        .out_last    (out_last)
     );
 
 endmodule

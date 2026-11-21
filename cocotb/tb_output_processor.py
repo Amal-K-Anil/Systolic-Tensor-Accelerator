@@ -7,9 +7,9 @@
 # Each result is optionally shifted (SHIFT_BITS) then saturated to
 # [SAT_MIN, SAT_MAX] before truncation to DATA_WIDTH. output_en is
 # driven externally (normally by feeder's drain_done); output_done is
-# self-generated, firing the cycle the true final result transfers,
-# and is used both to reset this module's own counters and (wired
-# externally) to clear feeder and the MAC array.
+# self-generated, firing one cycle after the true final result transfers.
+# The final transfer resets this module's row/col counters, while
+# output_done is wired externally to clear feeder and the systolic array.
 #
 # Test cases:
 #   1.1  Full ARRAY_SIZE x ARRAY_SIZE serialization, row-major order
@@ -30,13 +30,13 @@
 #   4.1  output_en low -- out_valid low, counters held at 0
 #   4.2  output_en rising exactly at reset release
 #   4.3  Multiple sessions, each starting fresh
-#   5.1  output_done fires exactly on the last result's transfer cycle
+#   5.1  output_done fires one cycle after the last result's transfer
 #   5.2  No early firing if out_ready=0 when counters reach max
-#   5.3  Counters reset the cycle after output_done
+#   5.3  Counters reset on the final transfer / output_done registration
 #   5.4  out_last held as a stable level, not a stray pulse
-#   5.5  Immediate back-to-back restart
+#   5.5  Back-to-back restart with one cleanup cycle
 #   6.1  Reset mid-serialization
-#   6.2  Reset right as output_done would fire
+#   6.2  Reset at the final-transfer completion point
 #   6.3  Long reset hold
 #   7.1  All-zero results
 #   7.2  All-max-positive results
@@ -452,10 +452,14 @@ async def test_3_3_out_ready_low_on_last_result(dut):
 
     dut.out_ready.value = 1
     await Timer(1, unit="ns")
-    assert int(dut.output_done.value) == 1, \
-        "output_done not high once out_ready arrived (checked before the final edge)"
+    assert int(dut.output_done.value) == 0
 
-    dut._log.info("PASS 3.3: output_done correctly waits for out_ready on the last result")
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    assert int(dut.output_done.value) == 1, \
+        "output_done not high after the accepted final transfer"
+
+    dut._log.info("PASS 3.3: output_done correctly fires after the accepted final transfer")
 
 
 @cocotb.test()
@@ -574,7 +578,7 @@ async def test_4_3_multiple_sessions(dut):
 
 @cocotb.test()
 async def test_5_1_output_done_exact_timing(dut):
-    """output_done fires exactly the cycle the last result transfers,
+    """output_done fires exactly one cycle after the last result transfers,
     no earlier, no later."""
     await start_clock(dut)
     array_size, data_width, accum_width, shift_bits, sat_max, sat_min = dut_params(dut)
@@ -591,13 +595,25 @@ async def test_5_1_output_done_exact_timing(dut):
         assert int(dut.output_done.value) == 0, f"output_done fired early at result {i}"
         await RisingEdge(dut.clk)
 
-    # after n-1 edges, row/col are already at the final position --
-    # output_done is combinational, so it is already high here, one
-    # edge before the final transfer actually completes
+    # At the final position, output_done must still be low.
     await Timer(1, unit="ns")
-    assert int(dut.output_done.value) == 1, "output_done not high on the final position"
+    assert int(dut.output_done.value) == 0, \
+        "output_done fired before the final transfer"
 
-    dut._log.info("PASS 5.1: output_done fires at the exact correct cycle")
+    # Final transfer occurs on this edge.
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+
+    # Registered completion pulse is now high.
+    assert int(dut.output_done.value) == 1, \
+        "output_done not high after the final transfer"
+
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    assert int(dut.output_done.value) == 0, \
+        "output_done stayed high for more than one cycle"
+
+    dut._log.info("PASS 5.1: output_done fires exactly one cycle after final transfer")
 
 
 @cocotb.test()
@@ -628,8 +644,8 @@ async def test_5_2_no_early_firing_on_stall(dut):
 
 
 @cocotb.test()
-async def test_5_3_counters_reset_after_output_done(dut):
-    """row/col reset to 0 the cycle after output_done fires."""
+async def test_5_3_counters_reset_on_final_transfer(dut):
+    """row/col reset on the final-transfer edge as output_done is registered."""
     await start_clock(dut)
     array_size, data_width, accum_width, shift_bits, sat_max, sat_min = dut_params(dut)
     await reset_dut(dut, array_size, accum_width)
@@ -643,16 +659,17 @@ async def test_5_3_counters_reset_after_output_done(dut):
     for _ in range(n - 1):
         await RisingEdge(dut.clk)
     await Timer(1, unit="ns")
-    assert int(dut.output_done.value) == 1
+    assert int(dut.output_done.value) == 0
 
-    # the nth edge is the one that both completes the final transfer
-    # and (triggered by output_done) resets row/col
+    # the nth edge completes the final transfer, resets row/col,
+    # and registers output_done high for the cleanup cycle
     await RisingEdge(dut.clk)
     await Timer(1, unit="ns")
+    assert int(dut.output_done.value) == 1
     assert int(dut.row.value) == 0, f"row not reset: {int(dut.row.value)}"
     assert int(dut.col.value) == 0, f"col not reset: {int(dut.col.value)}"
 
-    dut._log.info("PASS 5.3: row/col correctly reset one cycle after output_done")
+    dut._log.info("PASS 5.3: row/col correctly reset on the final transfer")
 
 
 @cocotb.test()
@@ -682,9 +699,9 @@ async def test_5_4_out_last_stable_during_stall(dut):
 
 
 @cocotb.test()
-async def test_5_5_immediate_back_to_back_restart(dut):
-    """After output_done, immediately (same/next cycle) start a fresh
-    session -- verify zero-gap resume works correctly."""
+async def test_5_5_back_to_back_restart_after_cleanup(dut):
+    """After the final transfer, allow the registered output_done cleanup
+cycle, then verify a fresh serialization session starts correctly."""
     await start_clock(dut)
     array_size, data_width, accum_width, shift_bits, sat_max, sat_min = dut_params(dut)
     await reset_dut(dut, array_size, accum_width)
@@ -698,15 +715,23 @@ async def test_5_5_immediate_back_to_back_restart(dut):
     for _ in range(n - 1):
         await RisingEdge(dut.clk)
     await Timer(1, unit="ns")
-    assert int(dut.output_done.value) == 1
+    assert int(dut.output_done.value) == 0
 
     # the nth edge completes the old session's final transfer AND
-    # (via output_done) resets row/col -- swap results only AFTER
-    # this edge, so the old session's last value isn't disturbed
+    # final_transfer resets row/col and registers output_done high
+    # -- swap results only AFTER this edge, so the old session's
+    # last value isn't disturbed
     await RisingEdge(dut.clk)
     await Timer(1, unit="ns")
+    assert int(dut.output_done.value) == 1
+    assert int(dut.out_valid.value) == 0
     dut.results.value = pack_results([4] * n, accum_width)
     await Timer(1, unit="ns")
+
+    await RisingEdge(dut.clk)
+    await Timer(1, unit="ns")
+    assert int(dut.output_done.value) == 0
+    assert int(dut.out_valid.value) == 1
 
     received = []
     for _ in range(n + 5):
@@ -721,7 +746,7 @@ async def test_5_5_immediate_back_to_back_restart(dut):
     expected = [golden_out_data(4, shift_bits, sat_max, sat_min, data_width)] * n
     assert received == expected, f"got {received}\nexpected {expected}"
 
-    dut._log.info("PASS 5.5: immediate back-to-back restart handled correctly")
+    dut._log.info("PASS 5.5: back-to-back restart after cleanup cycle handled correctly")
 
 
 # =========================================================================
@@ -760,7 +785,7 @@ async def test_6_1_reset_mid_serialization(dut):
 
 @cocotb.test()
 async def test_6_2_reset_at_output_done(dut):
-    """Reset asserted right as output_done would have fired."""
+    """Reset asserted at the final-transfer completion point."""
     await start_clock(dut)
     array_size, data_width, accum_width, shift_bits, sat_max, sat_min = dut_params(dut)
     await reset_dut(dut, array_size, accum_width)

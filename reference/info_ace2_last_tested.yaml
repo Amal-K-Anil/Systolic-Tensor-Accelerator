@@ -1,0 +1,84 @@
+# ----- ------ ----- ----- ------ ----- ----- ------ -----
+# Chipathon 2026: Project configuration
+# LICENSE: Apache License Version 2.0
+# http://www.apache.org/licenses/
+# ----- ------ ----- ----- ------ ----- ----- ------ -----
+
+# data will be pulled from main branch of the repo.
+# please be sure that the main branch contains the data you want to submit.
+# This file will be updated with more information later
+
+# ======================================================
+# Project metadata (used for documentation / review)
+# ======================================================
+project:
+  title: "AI Accelerator for CNN"
+  team: "Maxilerator"
+  discord: "irene_raphael, amxlanil, muhammedrabin, myx_on_57134, maroonchocopie"
+  description: "Parameterizable output-stationary systolic array accelerator for streaming matrix multiplication"
+  lvs_config: "lvs_config.json"
+
+
+pins:
+  # Pins are listed in the organizer-required clockwise order,
+  # assuming placement in the upper-left quadrant.
+
+  - name: VDD
+    io_type: power
+
+  - name: clk
+    io_type: input_schmitt
+
+  - name: rst_n
+    io_type: input_cmos
+
+  - name: a_valid_i
+    io_type: input_cmos
+
+  - name: a_last_i
+    io_type: input_cmos
+
+  - name: b_valid_i
+    io_type: input_cmos
+
+  - name: b_last_i
+    io_type: input_cmos
+
+  - name: out_ready_i
+    io_type: input_cmos
+
+  - name: data[0]
+    io_type: bidirectional_24ma
+
+  - name: data[1]
+    io_type: bidirectional_24ma
+
+  - name: data[2]
+    io_type: bidirectional_24ma
+
+  - name: data[3]
+    io_type: bidirectional_24ma
+
+  - name: data[4]
+    io_type: bidirectional_24ma
+
+  - name: data[5]
+    io_type: bidirectional_24ma
+
+  - name: data[6]
+    io_type: bidirectional_24ma
+
+  - name: data[7]
+    io_type: bidirectional_24ma
+
+  - name: a_ready_o
+    io_type: bidirectional_24ma
+
+  - name: b_ready_o
+    io_type: bidirectional_24ma
+
+  - name: out_valid_o
+    io_type: bidirectional_24ma
+
+  - name: out_last_o
+    io_type: bidirectional_24ma

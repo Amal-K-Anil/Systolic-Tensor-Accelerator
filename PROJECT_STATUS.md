@@ -8,7 +8,7 @@ The recommended continuation branch is:
 
 `latest-dev`
 
-This branch contains the latest useful RTL, verification, physical-design configuration, required synthesis override, and historical reference material needed to understand the previous timing and integration work.
+This branch contains the latest useful RTL, verification environment, physical-design configuration, required synthesis override, and historical reference material needed to understand the previous timing and integration work.
 
 ---
 
@@ -21,7 +21,7 @@ Use `latest-dev` for all future continuation work.
 It contains:
 
 - latest optimized accelerator RTL
-- latest cocotb tests
+- latest preserved cocotb verification environment
 - padless chip-level wrapper
 - updated SDC constraints
 - ACE2 physical-design configuration
@@ -31,7 +31,9 @@ It contains:
 - historical timing-repair experiments
 - continuation documentation
 
-The project has intentionally been consolidated so that a future developer does not need another experimental branch to recover important timing work.
+The cocotb environment is preserved, but the complete test suite has **not yet been fully reconciled with the final optimized RTL**. The exact verification status is documented later in this file.
+
+The project has been consolidated so that future continuation does not require a separate experimental timing branch.
 
 Historical timing material is stored under:
 
@@ -97,6 +99,8 @@ The following are part of the current development state:
 
 These are the files to use when continuing development.
 
+The cocotb files are active project files, but several tests still require adaptation to the final optimized RTL behavior.
+
 ## Historical/reference material
 
 Everything under:
@@ -141,7 +145,7 @@ Important examples include:
 
 - replicated feeder valid state
 - replicated skew-valid state
-- replicated MAC clear state
+- replicated MAC/control clear state
 - replicated local column state in the output processor
 
 The relevant registers use:
@@ -167,6 +171,10 @@ Important replicated structures include approximately:
 
 These registers were intentionally distributed so that synthesis and implementation would not create one large control tree feeding the full array.
 
+The feeder RTL is part of the optimized physical-design architecture.
+
+The dedicated feeder cocotb testbench has **not yet been reconciled with this final optimized version**. See the verification section later in this document.
+
 ---
 
 # 7. Output Processor Changes
@@ -183,9 +191,7 @@ The active implementation contains:
 - row-major result serialization
 - shift / saturation / truncation logic
 
-The current `output_done` behavior is important:
-
-`output_done` is registered and fires one cycle after the accepted final result transfer.
+The current `output_done` behavior is important.
 
 The actual final transfer is detected from:
 
@@ -193,47 +199,293 @@ The actual final transfer is detected from:
 out_valid && out_ready && out_last
 ```
 
-The final transfer resets serialization state and registers the one-cycle `output_done` pulse.
+The completion indication is registered relative to the accepted final transfer.
 
-The cocotb tests were updated to match this behavior.
+Serialization state is reset as part of the final-transfer/cleanup sequence.
+
+Several cocotb tests were modified during development to reflect the newer output behavior, but the final verification check showed that the complete output-processor test suite still contains older timing/value expectations.
+
+See the verification section later in this file before treating a failing output-processor test as an RTL defect.
 
 ---
 
 # 8. MAC Clear Behavior
 
-The MAC-unit clear behavior was also updated during optimization.
+The MAC-unit clear behavior was updated during optimization.
 
-The current verification expects `clear` to reset the accumulation state.
+The intended current behavior is that `clear` resets the accumulation state.
 
-The cocotb tests no longer require `a_out` and `b_out` to be cleared together with the accumulator.
+The newer verification behavior does not require `a_out` and `b_out` to be cleared together with the accumulator.
+
+The dedicated MAC testbench currently passes against the preserved RTL.
 
 See:
 
 `cocotb/tb_mac_unit.py`
 
-for the current expected behavior.
+for the currently validated MAC-level expectations.
 
 ---
 
 # 9. Verification State
 
-The latest cocotb test updates are included in `latest-dev`.
+The cocotb verification environment has **not been fully updated for the final optimized RTL**.
 
-Important updated tests include:
+This is an important remaining task for future development.
 
-- MAC clear behavior
+A final verification check was performed against the preserved `latest-dev` RTL before archiving the project.
+
+The observed results were:
+
+| Testbench | Result | Current interpretation |
+|---|---:|---|
+| `tb_mac_unit.py` | PASS | Compatible with current optimized RTL |
+| `tb_accelerator_core.py` | PASS | Compatible with its current test coverage and expectations |
+| `tb_systolic_array.py` | 3/9 PASS | Testbench requires review/update for current wavefront/timing behavior |
+| `tb_feeder.py` | 0/40 PASS | Testbench requires review; failures occur essentially at simulation start |
+| `tb_output_processor.py` | 13/28 PASS | Partially compatible; several timing/value expectations still require adaptation |
+| `chip_top_tb.py` | Simulation did not start | Cocotb Makefile still contains assumptions from the older physical-pad simulation flow |
+
+These failures should **not automatically be interpreted as RTL defects**.
+
+The optimized RTL underwent significant timing-oriented restructuring, including:
+
+- replicated feeder-valid control
+- replicated skew-valid control
+- replicated output-processor clear control
+- replicated local output-processor column state
+- serialization/timing changes
+- registered completion behavior
+- padless `chip_top` integration
+
+Some verification code still reflects earlier RTL timing and integration assumptions.
+
+---
+
+## 9.1 MAC Test Status
+
+`tb_mac_unit.py` passed completely during the final check.
+
+This testbench can therefore be considered compatible with the currently preserved MAC RTL.
+
+If the MAC RTL is modified in the future, this testbench is a useful baseline regression test.
+
+---
+
+## 9.2 Accelerator-Core Test Status
+
+`tb_accelerator_core.py` also passed during the final check.
+
+This is useful evidence that the integrated accelerator-core behavior expected by that testbench remains functional.
+
+However, this pass does **not** mean that every internal dedicated submodule testbench is already current.
+
+The dedicated feeder, systolic-array, and output-processor testbenches exercise implementation details and timing behavior that are not necessarily covered by the accelerator-core test.
+
+---
+
+## 9.3 Systolic-Array Test Status
+
+The final dedicated systolic-array run produced:
+
+```text
+TESTS=9
+PASS=3
+FAIL=6
+```
+
+The following tests passed:
+
+- reset behavior
+- clear resetting the processing elements
+- valid-gating/broadcast behavior
+
+Several tests related to:
+
+- wavefront tracing
+- packed result timing
+- identity matrix multiplication
+- random matrix multiplication
+- multi-pass accumulation
+
+failed.
+
+The observed failures showed that only early portions of the expected result matrix had propagated when the testbench expected the complete matrix.
+
+Because the optimized architecture changed valid/control distribution and timing, the dedicated systolic-array testbench should be reviewed for stale cycle/wavefront assumptions before changing RTL.
+
+Future work should compare:
+
+`cocotb/tb_systolic_array.py`
+
+against:
+
+`src/core/systolic_array.sv`
+
+and the current MAC/valid propagation behavior.
+
+---
+
+## 9.4 Feeder Test Status
+
+The final feeder run produced:
+
+```text
+TESTS=40
+PASS=0
+FAIL=40
+```
+
+Most failures occurred essentially at simulation start rather than after substantial simulated activity.
+
+This strongly suggests that the feeder verification environment needs to be reviewed for compatibility with the final optimized feeder interface/state behavior.
+
+The feeder RTL underwent significant timing-oriented restructuring through replicated valid/control state.
+
+A future developer should therefore inspect the testbench assumptions before interpreting the 40 failures as 40 independent RTL problems.
+
+Start with:
+
+`cocotb/tb_feeder.py`
+
+and compare its reset, ready/valid, vector-boundary, drain, clear, and timing assumptions against:
+
+`src/core/feeder.sv`
+
+---
+
+## 9.5 Output-Processor Test Status
+
+The final dedicated output-processor run produced:
+
+```text
+TESTS=28
+PASS=13
+FAIL=15
+```
+
+A substantial portion of the testbench already works with the current RTL.
+
+Passing areas included examples such as:
+
+- full serialization order
+- parameterization
+- unique serialization values
+- intermittent `out_ready` stalls
+- `output_en` held low
+- multiple sessions
+- no early completion firing during stall
+- reset during serialization
+- reset around completion
+- long reset hold
+- all-zero results
+- maximum positive saturation case
+- maximum negative saturation case
+
+Failing areas included several tests related to:
+
+- in-range value timing
+- saturation/boundary timing
+- shift behavior
+- `out_ready` timing
+- no-stall baseline timing
+- output enable at reset release
+- exact `output_done` timing
+- counter reset timing
+- final-result stall behavior
+- immediate restart/cleanup timing
+
+This pattern indicates that the testbench is **partially updated**, but still contains assumptions from earlier output-processor implementations.
+
+A future developer should compare:
+
+`cocotb/tb_output_processor.py`
+
+against:
+
+`src/core/output_processor.sv`
+
+before modifying the RTL.
+
+In particular, carefully review:
+
 - registered `output_done`
 - final-transfer timing
-- output-ready stall behavior
+- cleanup cycle behavior
 - counter reset timing
-- cleanup-cycle behavior between serialization sessions
+- output register latency
+- quantization pipeline latency
 
-Relevant files:
+---
 
-- `cocotb/tb_mac_unit.py`
-- `cocotb/tb_output_processor.py`
+## 9.6 `chip_top` Test Status
 
-These test changes were preserved together with the final RTL because they document the intended behavior of the optimized design.
+`chip_top_tb.py` exists, but the final test did not reach simulation.
+
+The failure occurred during the Makefile build stage.
+
+The cocotb Makefile attempted to use the older GF180 physical-I/O simulation model:
+
+```text
+gf180mcu_ws_io__blackbox.v
+```
+
+from the PDK I/O model directory.
+
+The requested file was not available at the expected path, and simulation stopped before the current `chip_top` RTL was tested.
+
+More importantly, the current `chip_top` implementation is padless, while the `chip_top` section of `cocotb/Makefile` still reflects significant parts of the older physical-pad simulation environment.
+
+The Makefile currently contains items associated with:
+
+- GF180 physical I/O models
+- GF180 workshop I/O models
+- chip ID IP
+- logo IP
+- old slot-selection behavior
+- physical-pad-oriented wrapper assumptions
+
+Future work should update the `chip_top` simulation configuration to match the current padless wrapper architecture.
+
+Do not interpret the final `chip_top` test result as an RTL failure because RTL simulation never actually started.
+
+---
+
+## 9.7 Testbench Work Remaining
+
+Recommended verification-maintenance order:
+
+1. `tb_feeder.py`
+2. `tb_systolic_array.py`
+3. `tb_output_processor.py`
+4. `chip_top_tb.py`
+5. `cocotb/Makefile` chip-level simulation configuration
+
+The already passing:
+
+- `tb_mac_unit.py`
+- `tb_accelerator_core.py`
+
+can serve as reference regressions.
+
+After updating the stale verification assumptions, rerun the complete suite.
+
+---
+
+## 9.8 How Future Developers Should Handle Failing Tests
+
+Before modifying optimized RTL because of a failing historical test:
+
+1. understand the current RTL behavior,
+2. identify exactly what the test expects,
+3. determine whether that expectation belongs to the old or current architecture,
+4. update stale timing/protocol expectations where appropriate,
+5. rerun the test,
+6. investigate RTL only when the failure represents a genuine functional discrepancy.
+
+The verification suite should therefore currently be considered:
+
+**partially updated, but not fully reconciled with the final optimized implementation.**
 
 ---
 
@@ -519,7 +771,7 @@ The exact PDK paths may need adjustment in a new environment.
 
 # 20. Makefile Caveat
 
-The Makefile contains convenience targets, including ACE2 selection.
+The repository Makefile contains convenience targets, including ACE2 selection.
 
 The later configuration used ACE2 as the default slot.
 
@@ -539,11 +791,19 @@ unless the Makefile is explicitly updated to do so.
 
 Always verify the Python import path before synthesis.
 
+There is also a separate verification-related caveat:
+
+`cocotb/Makefile`
+
+still contains significant legacy physical-pad assumptions for the `chip_top` test configuration.
+
+The physical-design Makefile and cocotb Makefile should therefore each be reviewed independently when development resumes.
+
 ---
 
 # 21. Legacy Padring Target
 
-The Makefile also contains an older pad-ring-related target using the previous integration approach.
+The main Makefile also contains an older pad-ring-related target using the previous integration approach.
 
 That target belongs to the older physical-pad workflow.
 
@@ -671,7 +931,7 @@ The observed endpoint was approximately:
 data[6] -> _83701_/D
 ```
 
-This should be re-evaluated after any floorplan, padframe, constraint, or routing changes because synthesized instance names may change.
+This should be re-evaluated after any floorplan, padframe, constraint, synthesis, or routing changes because synthesized instance names may change.
 
 Do not hard-code future repair logic around `_83701_`.
 
@@ -764,7 +1024,7 @@ rather than assuming timing configuration caused the failure.
 
 # 31. Historical Timing-Repair Experiments
 
-Earlier repo5 work explored more aggressive custom timing repair.
+Earlier work explored more aggressive custom timing repair.
 
 Those useful experiments have been consolidated under:
 
@@ -893,7 +1153,9 @@ PDN_ENABLE_PINS: true
 PDN_EXTEND_TO: boundary
 ```
 
-The exact values should be checked in the active `librelane/config.yaml`.
+The exact values should be checked in the active:
+
+`librelane/config.yaml`
 
 If final organizer integration provides explicit power-pad or ring requirements, the PDN configuration may need to be revised.
 
@@ -905,6 +1167,8 @@ The project should **not** be considered final/signoff-complete.
 
 The later development had made strong progress in timing, but remaining work included:
 
+- verification-suite reconciliation
+- chip-level cocotb/Makefile cleanup
 - remaining hold cleanup
 - slew cleanup
 - fanout cleanup
@@ -927,13 +1191,13 @@ If development is resumed, follow this order.
 ## Step 1 — Checkout the continuation branch
 
 ```sh
-git checkout latest-dev
+git switch latest-dev
 ```
 
 or:
 
 ```sh
-git switch latest-dev
+git checkout latest-dev
 ```
 
 ---
@@ -961,15 +1225,50 @@ Verify:
 - Yosys version
 - GF180 PDK installation
 - Python version
+- cocotb version
+- Icarus Verilog version
 - PDK root path
 
-The preserved override was developed against the environment available during the 2026 work.
+The preserved environment was developed during the 2026 work.
 
-Version changes may alter synthesis or physical-design behavior.
+Version changes may alter synthesis, simulation, or physical-design behavior.
 
 ---
 
-## Step 4 — Activate the synthesis override
+## Step 4 — Reconcile the verification suite
+
+Before making substantial new RTL changes, review the known verification status.
+
+Currently passing:
+
+```text
+tb_mac_unit.py
+tb_accelerator_core.py
+```
+
+Currently requiring review/update:
+
+```text
+tb_feeder.py
+tb_systolic_array.py
+tb_output_processor.py
+chip_top_tb.py
+cocotb/Makefile
+```
+
+Do not rewrite optimized RTL simply to satisfy an old cycle-level assumption without first checking whether the test expectation is stale.
+
+A sensible order is:
+
+1. feeder
+2. systolic array
+3. output processor
+4. chip-level test / Makefile
+5. full regression
+
+---
+
+## Step 5 — Activate the synthesis override
 
 From the repository root:
 
@@ -981,9 +1280,9 @@ Confirm that Python is loading LibreLane from the project-local override before 
 
 ---
 
-## Step 5 — Review final organizer integration data
+## Step 6 — Review final organizer integration data
 
-Before spending time on timing closure, obtain or confirm the final:
+Before spending significant time on timing closure, obtain or confirm the final:
 
 - slot geometry
 - slot DEF
@@ -1004,7 +1303,7 @@ librelane/chip_top.sdc
 
 ---
 
-## Step 6 — Reconcile the current `info.yaml`
+## Step 7 — Reconcile the current `info.yaml`
 
 Use the repository-root `info.yaml` as the current logical integration definition.
 
@@ -1018,19 +1317,24 @@ Do not silently revert to the historical file.
 
 ---
 
-## Step 7 — Reproduce synthesis
+## Step 8 — Reproduce synthesis
 
 Run synthesis with the local LibreLane override enabled.
 
 Verify that replicated `(* keep *)` registers remain separate after synthesis.
 
-In particular, check the feeder valid distribution and output-processor clear distribution.
+In particular, check:
+
+- feeder valid distribution
+- skew-valid distribution
+- output-processor clear distribution
+- replicated local output control
 
 If equivalent registers have been merged again, stop before physical design and investigate the synthesis environment.
 
 ---
 
-## Step 8 — Reproduce physical implementation
+## Step 9 — Reproduce physical implementation
 
 Use the active:
 
@@ -1045,7 +1349,7 @@ If the final organizer floorplan differs from ACE2, update the slot configuratio
 
 ---
 
-## Step 9 — Establish a new baseline
+## Step 10 — Establish a New Physical Baseline
 
 Before applying historical repair experiments, record:
 
@@ -1063,7 +1367,7 @@ This becomes the new continuation baseline.
 
 ---
 
-## Step 10 — Compare against the historical best
+## Step 11 — Compare Against the Historical Best
 
 The main historical timing target to compare against is the completed 2.5-margin run.
 
@@ -1080,7 +1384,7 @@ Do not expect exact reproduction if the floorplan, padframe, tools, or PDK have 
 
 ---
 
-## Step 11 — Resolve remaining hold
+## Step 12 — Resolve Remaining Hold
 
 Re-evaluate the remaining fast-corner input hold paths.
 
@@ -1090,7 +1394,7 @@ Prefer structural or constraint-aware repair.
 
 ---
 
-## Step 12 — Continue electrical cleanup
+## Step 13 — Continue Electrical Cleanup
 
 Focus on:
 
@@ -1104,7 +1408,7 @@ Keep the delay-cell exclusions unless there is strong evidence that re-enabling 
 
 ---
 
-## Step 13 — Consult historical timing experiments only if necessary
+## Step 14 — Consult Historical Timing Experiments Only If Necessary
 
 If the normal active flow cannot close remaining electrical issues, inspect:
 
@@ -1123,7 +1427,24 @@ Do not enable all historical modifications at once.
 
 ---
 
-## Step 14 — Final signoff
+## Step 15 — Final Verification
+
+After testbench reconciliation and any RTL changes, rerun the complete functional regression.
+
+At minimum verify:
+
+- MAC
+- feeder
+- systolic array
+- output processor
+- accelerator core
+- padless chip-level wrapper
+
+The final chip-level verification should use a cocotb/Makefile configuration that actually matches the padless wrapper rather than the older physical-pad simulation path.
+
+---
+
+## Step 16 — Final Signoff
 
 Once the final physical integration is stable, rerun:
 
@@ -1150,7 +1471,7 @@ The most important continuation points are:
 6. Activate that override through `PYTHONPATH`.
 7. The override preserves replicated `(* keep *)` control registers.
 8. Delay-cell exclusion was important for setup timing.
-9. `DELAY 4` with density around 50% was the strongest later direction.
+9. `DELAY 4` with density around 50% was the strongest later physical-design direction.
 10. The 2.5 hold-margin run is the last fully completed timing reference.
 11. The current 2.6 setting is not validated.
 12. Setup was closed in the best later run.
@@ -1159,6 +1480,11 @@ The most important continuation points are:
 15. The final organizer padframe/floorplan still needs reconciliation.
 16. `reference/timing-repair/` contains useful historical experiments but is not active flow.
 17. The project is not yet final signoff-clean.
+18. The cocotb suite is only partially reconciled with the optimized RTL.
+19. `tb_mac_unit.py` and `tb_accelerator_core.py` currently pass.
+20. Feeder, systolic-array, and output-processor dedicated tests require review/update.
+21. `chip_top_tb.py` did not run because the cocotb Makefile still follows parts of the old physical-pad simulation setup.
+22. Do not change optimized RTL merely to satisfy a stale historical cycle-level test expectation without checking the intended current behavior first.
 
 ---
 
@@ -1166,13 +1492,19 @@ The most important continuation points are:
 
 The project had progressed beyond basic RTL development.
 
-The main remaining challenge was no longer functional design, but physical integration and timing/electrical closure.
+The main remaining work is divided between:
+
+- verification-environment reconciliation
+- final physical integration
+- timing/electrical closure
+- final signoff
 
 Major accomplishments already incorporated into `latest-dev` include:
 
 - developed systolic accelerator RTL
-- functional verification updates
+- timing-oriented RTL optimization
 - high-fanout RTL restructuring
+- replicated local control state
 - synthesis preservation of replicated control logic
 - padless chip wrapper
 - ACE2 physical-design configuration
@@ -1181,7 +1513,21 @@ Major accomplishments already incorporated into `latest-dev` include:
 - positive setup timing across the analyzed corners
 - near-closure of hold timing
 - preservation of useful historical repair experiments
+- preservation of the current verification environment and its known compatibility state
 
-The recommended continuation strategy is therefore:
+Functional verification is **not completely finished** for the final optimized implementation.
 
-**preserve the current RTL architecture, establish the final organizer-compatible physical implementation, reproduce the later timing baseline, and continue physical signoff from there.**
+The final check showed:
+
+```text
+mac_unit          : PASS
+accelerator_core  : PASS
+systolic_array    : PARTIAL / requires testbench review
+feeder            : requires testbench review
+output_processor  : PARTIAL / requires testbench review
+chip_top          : simulation setup requires Makefile update
+```
+
+Therefore the recommended continuation strategy is:
+
+**preserve the current optimized RTL architecture, reconcile the cocotb testbenches with that architecture, establish the final organizer-compatible physical implementation, reproduce the later timing baseline, and continue physical signoff from there.**

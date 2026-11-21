@@ -1,6 +1,6 @@
 meta:
   version: 3
-  flow: Chip
+  flow: Classic
   substituting_steps:
 
     # Disable KLayout DRC
@@ -56,28 +56,38 @@ VDD_NETS:
 GND_NETS:
 - VSS
 
-# We need to add gf180mcu_fd_io__bi_24t
-# due to the unused Y output for output only pads
 IGNORE_DISCONNECTED_MODULES:
-- gf180mcu_fd_io__bi_24t
 - gf180mcu_ws_ip__id
 - gf180mcu_ws_ip__logo
 
+EXTRA_EXCLUDED_CELLS:
+  - "gf180mcu_fd_sc_mcu7t5v0__dlya_*"
+  - "gf180mcu_fd_sc_mcu7t5v0__dlyb_*"
+  - "gf180mcu_fd_sc_mcu7t5v0__dlyc_*"
+  - "gf180mcu_fd_sc_mcu7t5v0__dlyd_*"
+
 # Clock
-CLOCK_PORT: clk_PAD
-CLOCK_NET: clk_pad/Y
+CLOCK_PORT: clk
+CLOCK_NET: clk
 CLOCK_PERIOD: 40 # 25 MHz
+
+# DRV constraints
+MAX_TRANSITION_CONSTRAINT: 4
+MAX_CAPACITANCE_CONSTRAINT: null
 
 # Fix hold violations
 PL_RESIZER_HOLD_SLACK_MARGIN: 0.35
-GRT_RESIZER_HOLD_SLACK_MARGIN: 0.3
+GRT_RESIZER_HOLD_SLACK_MARGIN: 2.6
+RUN_POST_GRT_RESIZER_TIMING: true
+
+SYNTH_STRATEGY: "DELAY 4"
 
 # Increase for more logic
 # on your die
-PL_TARGET_DENSITY_PCT: 70
-GRT_ALLOW_CONGESTION: true
-
-SYNTH_STRATEGY: "AREA 1"
+PL_TARGET_DENSITY_PCT: 50
+PL_OPTIMIZE_MIRRORING: true
+CTS_APPLY_NDR: none
+GRT_ALLOW_CONGESTION: false
 
 # Fix antenna violations after DRT
 DRT_ANTENNA_REPAIR_ITERS: 10
@@ -92,12 +102,13 @@ PDN_VPITCH: 75
 PDN_HPITCH: 75
 
 # PDN - Core ring
-PDN_CORE_RING: True
+PDN_CORE_RING: False
 # Maximum metal width without slotting: 30um
 PDN_CORE_RING_VWIDTH: 25
 PDN_CORE_RING_HWIDTH: 25
-PDN_CORE_RING_CONNECT_TO_PADS: True
-PDN_ENABLE_PINS: False
+PDN_CORE_RING_CONNECT_TO_PADS: False
+PDN_ENABLE_PINS: True
+PDN_EXTEND_TO: boundary
 PDN_CORE_VERTICAL_LAYER: Metal2
 PDN_CORE_HORIZONTAL_LAYER: Metal3
 
@@ -109,7 +120,7 @@ PDN_CORE_HORIZONTAL_LAYER: Metal3
 # Do not error on magic DRC violations
 # Note: Passing magic DRC is not required for the submission.
 # However, it is recommended to fix or carefully review all violations.
-ERROR_ON_MAGIC_DRC: False
+ERROR_ON_MAGIC_DRC: True
 
 # Prevent false positive DRC errors in I/O cells
 MAGIC_GDS_FLATGLOB:
@@ -144,13 +155,6 @@ MAGIC_GDS_FLATGLOB:
 - "xdec32_*"
 - "sa_*"
 
-# Since we cannot meet the minimum density limit on Metal2,
-# ignore active metal on previous and subsequent layers
-# (DM.5_DM.7 and DM.4_DM.6). Dummy metal is moved to active
-# metal during the precheck.
-KLAYOUT_FILLER_OPTIONS:
-  Metal2_ignore_active: true
-
 # Because we have multiple power pads for one power domain
 MAGIC_EXT_UNIQUE: notopports
 
@@ -167,7 +171,7 @@ MACROS:
         - dir::../ip/gf180mcu_ws_ip__id/lib/gf180mcu_ws_ip__id.lib
     instances:
       chip_id:
-        location: [26, 26]
+        location: [600, 26]
         orientation: N
 
   gf180mcu_ws_ip__logo:
@@ -182,7 +186,7 @@ MACROS:
         - dir::../ip/gf180mcu_ws_ip__logo/lib/gf180mcu_ws_ip__logo.lib
     instances:
       wafer_space_logo:
-        location: ["expr::$DIE_AREA[2] + -169.25", "expr::$DIE_AREA[3] + -169.25"]
+        location: ["expr::$DIE_AREA[2] + -169.25", 600]
         orientation: N
 
 # No user macros needed beyond chip_id + wafer.space logo (above),

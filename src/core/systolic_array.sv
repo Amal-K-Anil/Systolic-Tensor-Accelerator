@@ -14,9 +14,8 @@
 //   along that anti-diagonal receives its correct pair on the same cycle. This
 //   module has no awareness of skewing itself; it only wires PEs together and lets
 //   each one forward its inputs one cycle later, which is what actually produces the
-//   diagonal propagation feeder's skew was designed around.
-//
-//   valid and clear fan out identically to every PE in the array.
+//   diagonal propagation feeder's skew was designed around. valid and clear are
+//   distributed independently to every PE in the array.
 // =======================================================================================
 
 `default_nettype none
@@ -31,14 +30,18 @@ module systolic_array #(
 
     input  logic [ARRAY_SIZE*DATA_WIDTH-1:0]             a_in,      // from feeder, packed
     input  logic [ARRAY_SIZE*DATA_WIDTH-1:0]             b_in,      // from feeder, packed
-    input  logic                                         valid,     // a_in/b_in valid this cycle
-    input  logic                                         clear,     // reset all PEs for next run
+    input  logic [ARRAY_SIZE*ARRAY_SIZE-1:0]             valid,     // per-PE valid, packed
+    input  logic [ARRAY_SIZE*ARRAY_SIZE-1:0]             clear,     // per-PE clear, packed
 
     output logic [ARRAY_SIZE*ARRAY_SIZE*ACCUM_WIDTH-1:0] results    // full grid, packed
 );
 
     logic signed [DATA_WIDTH-1:0]  a_in_arr [0:ARRAY_SIZE-1];
     logic signed [DATA_WIDTH-1:0]  b_in_arr [0:ARRAY_SIZE-1];
+
+    logic                          valid_arr [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+    logic                          clear_arr [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
+
     logic signed [ACCUM_WIDTH-1:0] results_arr [0:ARRAY_SIZE-1][0:ARRAY_SIZE-1];
 
     logic signed [DATA_WIDTH-1:0]  a_bus [0:ARRAY_SIZE-1][0:ARRAY_SIZE];
@@ -54,9 +57,10 @@ module systolic_array #(
             assign a_in_arr[pi] = a_in[pi*DATA_WIDTH +: DATA_WIDTH];
             assign b_in_arr[pi] = b_in[pi*DATA_WIDTH +: DATA_WIDTH];
 
-            for (pj = 0; pj < ARRAY_SIZE; pj = pj + 1) begin : pack_outputs
-                assign results[(pi*ARRAY_SIZE + pj)*ACCUM_WIDTH +: ACCUM_WIDTH]
-                    = results_arr[pi][pj];
+            for (pj = 0; pj < ARRAY_SIZE; pj = pj + 1) begin : unpack_controls_pack_results
+                assign valid_arr[pi][pj] = valid[pi*ARRAY_SIZE + pj];
+                assign clear_arr[pi][pj] = clear[pi*ARRAY_SIZE + pj];
+                assign results[(pi*ARRAY_SIZE + pj)*ACCUM_WIDTH +: ACCUM_WIDTH] = results_arr[pi][pj];
             end
         end
     endgenerate
@@ -86,8 +90,8 @@ module systolic_array #(
                 ) pe (
                     .clk       (clk),
                     .rst_n     (rst_n),
-                    .valid     (valid),
-                    .clear     (clear),
+                    .valid     (valid_arr[r][c]),
+                    .clear     (clear_arr[r][c]),
 
                     .a_in      (a_bus[r][c]),
                     .b_in      (b_bus[r][c]),

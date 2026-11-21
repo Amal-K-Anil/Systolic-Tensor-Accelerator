@@ -51,8 +51,6 @@ module mac_unit #(
             b_out     <= '0;
             accum_out <= '0;
         end else if (clear) begin
-            a_out     <= '0;
-            b_out     <= '0;
             accum_out <= '0;
         end else if (valid) begin
             a_out     <= a_in;

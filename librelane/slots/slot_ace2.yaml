@@ -1,0 +1,58 @@
+# ACE2 -- experimental configuration for Team Maxilerator's
+# systolic-array accelerator.
+#
+# Organizer allocation:
+#   7/8-size block
+#   2235 x 2235 um bounding area
+#   64 package-pad positions
+#
+# The final organizer-provided DEF is not yet available. Until then,
+# the two unavailable ACE2 corner regions are represented as placement
+# obstructions. Final pin positions will come from the organizer DEF.
+
+# Floorplanning
+FP_SIZING: absolute
+DIE_AREA: [0, 0, 2235, 2235]
+
+# ACE2 excluded 1/16 regions
+FP_OBSTRUCTIONS:
+  - [0, 0, 560, 560]
+  - [1675, 1675, 2235, 2235]
+
+# Do not route through the two regions outside the ACE2 allocation.
+ROUTING_OBSTRUCTIONS:
+  - [Metal1, 0, 0, 560, 560]
+  - [Metal2, 0, 0, 560, 560]
+  - [Metal3, 0, 0, 560, 560]
+  - [Metal4, 0, 0, 560, 560]
+  - [Metal5, 0, 0, 560, 560]
+
+  - [Metal1, 1675, 1675, 2235, 2235]
+  - [Metal2, 1675, 1675, 2235, 2235]
+  - [Metal3, 1675, 1675, 2235, 2235]
+  - [Metal4, 1675, 1675, 2235, 2235]
+  - [Metal5, 1675, 1675, 2235, 2235]
+
+# Keep the PDN out of the same unavailable ACE2 regions.
+PDN_OBSTRUCTIONS:
+  - [Metal1, 0, 0, 560, 560]
+  - [Metal2, 0, 0, 560, 560]
+  - [Metal3, 0, 0, 560, 560]
+  - [Metal4, 0, 0, 560, 560]
+  - [Metal5, 0, 0, 560, 560]
+
+  - [Metal1, 1675, 1675, 2235, 2235]
+  - [Metal2, 1675, 1675, 2235, 2235]
+  - [Metal3, 1675, 1675, 2235, 2235]
+  - [Metal4, 1675, 1675, 2235, 2235]
+  - [Metal5, 1675, 1675, 2235, 2235]
+
+VERILOG_DEFINES: ["SLOT_ACE2"]
+
+# Temporary pin placement only.
+# Avoid placing pins along the outer edges of the unavailable ACE2 regions.
+IO_EXCLUDE_PIN_REGION:
+  - "bottom:0-560"
+  - "left:0-560"
+  - "top:1675-2235"
+  - "right:1675-2235"

@@ -21,6 +21,9 @@
 //   wavefronts to push the remaining data out of the skew buffer and array.
 //   drain_done then latches (one cycle after the last flush wavefront, to let
 //   the MAC array's registers settle) so output_processor can safely start.
+//
+//   Valid control is replicated per PE for the systolic array and per row for
+//   the skew buffer to reduce high-fanout control paths.
 // =======================================================================================
 
 `default_nettype none
@@ -33,25 +36,25 @@ module feeder #(
     input  logic                              rst_n,
 
     // Host Interface - Activation channel (AXI4-Stream, sink side)
-    input  logic [DATA_WIDTH-1:0]             a_data,      // activation word
-    input  logic                              a_valid,     // activation word valid
-    output logic                              a_ready,     // may accept activation word
-    input  logic                              a_last,      // true final word, activation stream
+    input  logic [DATA_WIDTH-1:0]             a_data,       // activation word
+    input  logic                              a_valid,      // activation word valid
+    output logic                              a_ready,      // may accept activation word
+    input  logic                              a_last,       // true final word, activation stream
 
     // Host Interface - Weight channel (AXI4-Stream, sink side)
-    input  logic [DATA_WIDTH-1:0]             b_data,      // weight word
-    input  logic                              b_valid,     // weight word valid
-    output logic                              b_ready,     // may accept weight word
-    input  logic                              b_last,      // true final word, weight stream
+    input  logic [DATA_WIDTH-1:0]             b_data,       // weight word
+    input  logic                              b_valid,      // weight word valid
+    output logic                              b_ready,      // may accept weight word
+    input  logic                              b_last,       // true final word, weight stream
 
     // Output Processor
-    input  logic                              clear,       // reset pulse, from output_processor
-    output logic                              drain_done,  // safe for output_processor to start
+    input  logic                              output_done,  // completed output, prepare for next run
+    output logic                              drain_done,   // safe for output_processor to start
 
     // Systolic Array
-    output logic [ARRAY_SIZE*DATA_WIDTH-1:0]  a_out,       // skewed activation words
-    output logic [ARRAY_SIZE*DATA_WIDTH-1:0]  b_out,       // skewed weight words
-    output logic                              valid        // a_out/b_out valid this cycle
+    output logic [ARRAY_SIZE*DATA_WIDTH-1:0]  a_out,        // skewed activation words
+    output logic [ARRAY_SIZE*DATA_WIDTH-1:0]  b_out,        // skewed weight words
+    output logic [ARRAY_SIZE*ARRAY_SIZE-1:0]  valid         // per-PE valid for systolic array
 );
 
     // ===================================================================================
@@ -80,7 +83,7 @@ module feeder #(
     assign b_vector_last = b_active && (b_count == COUNT_W'(ARRAY_SIZE-1));
 
     assign vector_done = (a_vector_last_r || a_vector_last) && (b_vector_last_r || b_vector_last);  // both lanes, now or latched
-    assign drain_en    = (a_last_r || a_last) && (b_last_r || b_last);                              // stays high until clear
+    assign drain_en    = (a_last_r || a_last) && (b_last_r || b_last);                              // stays high until output_done
 
     assign a_ready = !a_vector_last_r && !a_last_r;
     assign b_ready = !b_vector_last_r && !b_last_r;
@@ -93,7 +96,7 @@ module feeder #(
             b_vector_last_r <= 1'b0;
             a_last_r        <= 1'b0;
             b_last_r        <= 1'b0;
-        end else if (clear) begin
+        end else if (output_done) begin
             a_count         <= '0;
             b_count         <= '0;
             a_vector_last_r <= 1'b0;
@@ -111,13 +114,13 @@ module feeder #(
                 a_vector_last_r <= 1'b0;
                 b_vector_last_r <= 1'b0;
             end else begin
-                if (a_vector_last) 
+                if (a_vector_last)
                     a_vector_last_r <= 1'b1;
-                if (b_vector_last) 
+                if (b_vector_last)
                     b_vector_last_r <= 1'b1;
             end
 
-            if (a_last) 
+            if (a_last)
                 a_last_r <= 1'b1;
             if (b_last)
                 b_last_r <= 1'b1;
@@ -137,7 +140,7 @@ module feeder #(
             drain_en_r  <= 1'b0;
             drain_count <= '0;
             drain_done  <= 1'b0;
-        end else if (clear) begin
+        end else if (output_done) begin
             drain_en_r  <= 1'b0;
             drain_count <= '0;
             drain_done  <= 1'b0;
@@ -168,9 +171,6 @@ module feeder #(
                 if (!rst_n) begin
                     a_stage[pos] <= '0;
                     b_stage[pos] <= '0;
-                end else if (clear) begin
-                    a_stage[pos] <= '0;
-                    b_stage[pos] <= '0;
                 end else if (drain_en_r) begin
                     a_stage[pos] <= '0;  // flush: zeros for skew buffer to shift out
                     b_stage[pos] <= '0;
@@ -186,16 +186,64 @@ module feeder #(
 
 
     // ===================================================================================
+    //  Valid Distribution
+    // ===================================================================================
+    genvar valid_row, valid_col;
+    generate
+        for (valid_row = 0; valid_row < ARRAY_SIZE; valid_row = valid_row + 1) begin : g_valid_row
+            for (valid_col = 0; valid_col < ARRAY_SIZE; valid_col = valid_col + 1) begin : g_valid_col
+
+                (* keep = "true" *)
+                logic valid_r;
+
+                always_ff @(posedge clk or negedge rst_n) begin
+                    if (!rst_n)
+                        valid_r <= 1'b0;
+                    else if (output_done)
+                        valid_r <= 1'b0;
+                    else
+                        valid_r <= vector_done || drain_en_r;
+                end
+
+                assign valid[valid_row*ARRAY_SIZE + valid_col] = valid_r;
+
+            end
+        end
+    endgenerate
+
+
+    // ===================================================================================
+    //  Skew Valid Distribution
+    // ===================================================================================
+    logic [ARRAY_SIZE-1:1] skew_valid;
+
+    genvar skew_row;
+    generate
+        for (skew_row = 1; skew_row < ARRAY_SIZE; skew_row = skew_row + 1) begin : g_skew_valid
+
+            (* keep = "true" *)
+            logic skew_valid_r;
+
+            always_ff @(posedge clk or negedge rst_n) begin
+                if (!rst_n)
+                    skew_valid_r <= 1'b0;
+                else if (output_done)
+                    skew_valid_r <= 1'b0;
+                else
+                    skew_valid_r <= vector_done || drain_en_r;
+            end
+
+            assign skew_valid[skew_row] = skew_valid_r;
+
+        end
+    endgenerate
+
+
+    // ===================================================================================
     //  Skew Buffer
     // ===================================================================================
     logic [DATA_WIDTH-1:0] a_skew [0:SKEW_DEPTH-1];
     logic [DATA_WIDTH-1:0] b_skew [0:SKEW_DEPTH-1];
-
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)      valid <= 1'b0;
-        else if (clear)  valid <= 1'b0;
-        else             valid <= vector_done || drain_en_r;
-    end
 
     // row 0: no register, direct read from staging
     assign a_out[0 +: DATA_WIDTH] = a_stage[0];
@@ -211,10 +259,7 @@ module feeder #(
                     if (!rst_n) begin
                         a_skew[ROW_BASE+stage] <= '0;
                         b_skew[ROW_BASE+stage] <= '0;
-                    end else if (clear) begin
-                        a_skew[ROW_BASE+stage] <= '0;
-                        b_skew[ROW_BASE+stage] <= '0;
-                    end else if (valid) begin
+                    end else if (skew_valid[row]) begin
                         if (stage == 0) begin
                             a_skew[ROW_BASE] <= a_stage[row];
                             b_skew[ROW_BASE] <= b_stage[row];

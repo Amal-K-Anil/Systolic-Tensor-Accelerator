@@ -14,7 +14,7 @@
 #    1  Reset               -- all outputs zero immediately after reset
 #    2  Single accumulate   -- one valid pulse, correct product one cycle later
 #    3  Multiple accumulate -- running sum across several valid pulses
-#    4  Clear resets all    -- clear zeroes a_out, b_out, and accum_out together
+#    4  Clear resets all    -- clear zeroes accum_out
 #    5  Clear priority      -- clear and valid same cycle -> clear wins
 #    6  a/b hold on !valid  -- a_out/b_out do NOT change when valid=0
 #    7  Accum holds         -- accum_out does not change across valid=0 cycles
@@ -155,8 +155,8 @@ async def test_multiple_accumulate(dut):
 # =========================================================================
 
 @cocotb.test()
-async def test_clear_resets_all_outputs(dut):
-    """clear zeroes a_out, b_out, and accum_out together."""
+async def test_clear_resets_accum(dut):
+    """clear zeroes accum_out."""
     await start_clock(dut)
     await reset_dut(dut)
 
@@ -166,8 +166,6 @@ async def test_clear_resets_all_outputs(dut):
     await drive(dut, 0, 0, valid=0, clear=1)
     await idle(dut)
 
-    assert read_a_out(dut) == 0
-    assert read_b_out(dut) == 0
     assert read_accum(dut) == 0
 
 
@@ -195,8 +193,6 @@ async def test_clear_priority_over_valid(dut):
     await Timer(1, unit="ns")
 
     assert read_accum(dut) == 0, "clear did not take priority over valid"
-    assert read_a_out(dut) == 0
-    assert read_b_out(dut) == 0
 
 
 # =========================================================================
